@@ -91,6 +91,8 @@ AudiobookAI/
 ├── tests/                               # Automated tests
 ├── README.md
 ├── INSTALL.md
+├── pyproject.toml                       # Dependency metadata (not a wheel)
+├── LICENSE                              # MIT license for original project code
 ├── books/                              # User-created; Git-ignored
 ├── voices/                             # User-created; WAVs Git-ignored
 └── output/                             # User-created; Git-ignored
@@ -146,6 +148,8 @@ This project is not affiliated with Resemble AI or the authors, publishers, and 
 
 ## License and contributions
 
-**No project license is currently included in this repository.** Public visibility on GitHub does not, by itself, grant permission to reuse, modify, or redistribute this source. Add an explicit `LICENSE` before advertising the project as open-source or accepting redistribution-oriented contributions. Third-party dependencies retain their own licenses.
+AudiobookAI's original source code and documentation are available under the **[MIT License](LICENSE)**. This permission applies to the original project code, **not** to third-party EPUBs, narrator recordings, generated audio, downloaded model weights, or dependencies. Those materials retain their own licenses and rights. The Chatterbox TTS dependency is maintained separately by Resemble AI.
+
+Dependency requirements are declared in [`pyproject.toml`](pyproject.toml). **The repository does not yet include a tested `uv.lock`**: a fully reproducible GPU installation requires validating and locking the PyTorch/CUDA/Chatterbox versions on an actual supported machine. See [INSTALL.md](INSTALL.md#dependency-manifest-and-locking).
 
 Bug reports should include the OS, Python/PyTorch versions, GPU, relevant (redacted) logs, and a small reproducible test case. Never attach copyrighted EPUBs, narrator recordings, credentials, or full audiobook outputs to issues.

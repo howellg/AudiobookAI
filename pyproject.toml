@@ -1,0 +1,40 @@
+# AudiobookAI Studio dependency manifest for the current scripts-based layout.
+# See INSTALL.md before changing the known-good CUDA/Chatterbox environment.
+
+[project]
+name = "audiobookai-studio"
+version = "2.4.0"
+description = "Local EPUB-to-audiobook studio powered by Chatterbox TTS"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "MIT"
+authors = [{ name = "Garret Howell" }]
+keywords = ["audiobooks", "epub", "tts", "chatterbox", "pyside6"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+  "PySide6>=6.7,<7",
+  "EbookLib>=0.18,<1",
+  "beautifulsoup4>=4.12,<5",
+  "lxml>=5,<7",
+  "numpy>=1.24,<2",
+  "soundfile>=0.12,<1",
+]
+
+[project.optional-dependencies]
+# These are opt-in because Torch/TorchAudio need the correct accelerator build.
+# Version 0.1.7 is the current upstream release, NOT yet GPU-verified with V7 Smooth.
+tts = ["chatterbox-tts==0.1.7"]
+# Local SQLite works without these packages.
+mysql = ["mysql-connector-python>=9,<10", "keyring>=25,<27"]
+
+[tool.uv]
+# The repository presently launches scripts from ./scripts and relies on
+# paths relative to the checkout. Do not package as a distributable wheel yet.
+package = false

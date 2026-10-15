@@ -14,7 +14,7 @@ You will need:
 - A **WAV reference recording** you are permitted to use as a narrator sample. This is not bundled in the repository.
 - Sufficient storage for model dependencies, cached speech, chapter WAVs, and final M4Bs. Large books can create many intermediate files.
 
-**Python 3.11 is recommended.** The project was developed against a Python 3.11 Chatterbox environment. This is a developer-oriented setup; package versions are **not yet locked** in the repository, so newly installed versions may require troubleshooting.
+**Python 3.11 is recommended and required by the current `pyproject.toml` manifest.** The project was developed against a Python 3.11 Chatterbox environment. Dependencies are now declared, but a **tested lockfile has not been committed yet**; clean installs may require GPU-specific troubleshooting.
 
 > **If AudiobookAI already runs on your computer:** Do **not** delete `.venv-chatterbox/`, `output/`, `books/`, or `voices/`, and do not blindly reinstall PyTorch. Skip to [Start the application](#5-start-the-application) using your existing virtual environment.
 
@@ -56,7 +56,7 @@ mkdir -p books voices output
 
 ## 3. Create a Python 3.11 environment
 
-The application works from the source checkout; no `pip install -e .` step is required.
+The application works from the source checkout; no `pip install -e .` step is required. Its `pyproject.toml` is **dependency-only**, not a distributable Python wheel, because scripts rely on paths relative to this checkout.
 
 ```bash
 uv python install 3.11
@@ -87,6 +87,31 @@ python -c 'import sys; print(sys.executable)'
 The executable should live inside the repository's `.venv-chatterbox/` directory.
 
 ## 4. Install Python dependencies
+
+### Dependency manifest and locking
+
+[`pyproject.toml`](pyproject.toml) declares the core GUI/EPUB/audio packages plus optional extras:
+
+| Extra | Installs | Needed for |
+| --- | --- | --- |
+| Base | PySide6, EbookLib, Beautiful Soup, lxml, NumPy, SoundFile | Desktop application and EPUB processing |
+| `tts` | `chatterbox-tts==0.1.7` and its upstream dependencies | Speech generation, Torch, TorchAudio |
+| `mysql` | `mysql-connector-python`, `keyring` | Optional MySQL metadata mirror / credential storage |
+
+For a **new checkout and disposable environment only**, you can use uv's project workflow instead of the manual commands below:
+
+```bash
+uv python install 3.11
+uv sync --python 3.11 --extra tts --extra mysql
+# uv creates .venv/ by default, not .venv-chatterbox/
+source .venv/bin/activate       # Bash/Zsh
+# source .venv/bin/activate.fish # Fish
+python scripts/audiobook_gui_v2.py
+```
+
+**Do not run `uv sync` in your current working Chatterbox environment without a backup.** It may change Torch/CUDA packages or remove dependencies not listed in the project. The `tts` extra currently selects upstream Chatterbox **0.1.7**, which has **not** been verified against V7 Smooth on the developer's GTX 1650. You can keep the proven manual setup below instead.
+
+`pyproject.toml` expresses direct dependency constraints, **not exact transitive reproducibility**. After validating a fresh installation on your hardware, generate and review a `uv.lock` (`uv lock`), then commit it as a separate change. On later fresh installs, `uv sync --locked --extra tts --extra mysql` can reproduce the resolved Python dependencies for the same platform, subject to GPU drivers and model downloads. Keep the model and platform dependencies in mind. For a snapshot of the **existing working environment** without modifying it, run `uv pip freeze > requirements-tested.txt`, inspect the file for any private paths or URLs, and decide whether to commit it as a hardware-specific reference.
 
 ### 4.1 Chatterbox, PyTorch, and audio generation
 
@@ -295,6 +320,8 @@ ffmpeg -version
 When filing a bug report, **redact passwords, credentials, private filenames, and copyrighted content**. Do not upload voice samples or full audiobooks.
 
 ## 11. Current scope
+
+The project's [MIT license](LICENSE) applies only to original source and documentation. It does not give permission to redistribute book content, reference narrator voices, generated audiobooks, or third-party models. The `pyproject.toml` is a dependency manifest, **not** a ready-to-distribute standalone package.
 
 This repository presently documents a **Linux source install**, not a universal turnkey installer. AMD ROCm, CPU-only, Windows, macOS, a bundled read-along EPUB reader, and distributable AppImage packaging are not yet validated or shipped in this source archive.
 
