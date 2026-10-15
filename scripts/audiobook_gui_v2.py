@@ -29,7 +29,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut, QPal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QMessageBox, QFileDialog, QInputDialog, QPlainTextEdit,
-    QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QProgressBar, QPushButton, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QLineEdit, QScrollArea,
 )
 
@@ -43,6 +43,7 @@ from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
+from audiobookai_readalong import read_chapter, chunk_at
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
 from audiobookai_pronunciation import (
     scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
@@ -131,7 +132,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.6 Preview · Archive Manager')
+        self.setWindowTitle('AudiobookAI Studio — V2.7 Preview · Read Along')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -184,12 +185,12 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.6 PREVIEW · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.7 PREVIEW · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive', 'Read Along']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -217,6 +218,7 @@ class Studio(QMainWindow):
         self.make_quality_page()
         self.make_pronunciation_page()
         self.make_archive_page()
+        self.make_readalong_page()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -290,6 +292,10 @@ class Studio(QMainWindow):
             self.pronunciation_refresh_books()
         if index == 7 and self.archive_proc is None:
             self.archive_refresh_books()
+        if index == 8:
+            self.reader_refresh_books()
+        elif hasattr(self, 'reader_audio') and self.reader_audio is not None:
+            self.reader_audio.pause()
 
     def make_library_page(self):
         """Build the imported-books table and library actions."""
@@ -1365,6 +1371,240 @@ class Studio(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(saved).parent)))
         else:
             QMessageBox.information(self, 'No archive', 'Export a complete edition first.')
+
+
+    def make_readalong_page(self):
+        """Build read-only, chunk-synchronized playback of finished chapter WAVs.
+
+        This page never generates speech. Older chunk indexes lack exact sample
+        offsets, so the highlights intentionally describe approximate timing.
+        """
+        l = self.page_base('Read Along · V2.7 preview',
+            'Read the saved spoken transcript alongside finished chapter audio. '
+            'Chunk highlights are estimates; the original EPUB is unchanged.')
+        pickers = QHBoxLayout()
+        self.reader_book = QComboBox()
+        self.reader_book.currentIndexChanged.connect(self.reader_book_changed)
+        self.reader_voice = QComboBox()
+        self.reader_voice.currentIndexChanged.connect(self.reader_voice_changed)
+        self.reader_section = QComboBox()
+        self.reader_section.currentIndexChanged.connect(self.reader_section_changed)
+        for label, combo in (('Book', self.reader_book), ('Narrator', self.reader_voice),
+                             ('Chapter', self.reader_section)):
+            pickers.addWidget(QLabel(label))
+            pickers.addWidget(combo, 1)
+        l.addLayout(pickers)
+
+        self.reader_summary = QLabel('Select a completed chapter to read along.')
+        self.reader_summary.setWordWrap(True)
+        l.addWidget(self.reader_summary)
+        self.reader_text = QPlainTextEdit()
+        self.reader_text.setReadOnly(True)
+        self.reader_text.setPlaceholderText('Saved narration chunks will appear here.')
+        self.reader_text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.reader_text.viewport().installEventFilter(self)
+        l.addWidget(self.reader_text, 1)
+
+        controls = QHBoxLayout()
+        controls.addWidget(mk_button('▶ Play / pause', self.reader_toggle))
+        controls.addWidget(mk_button('■ Stop', self.reader_stop))
+        controls.addWidget(mk_button('✎ Edit chapter', self.reader_open_editor))
+        self.reader_position = QSlider(Qt.Horizontal)
+        self.reader_position.setRange(0, 0)
+        self.reader_position.sliderReleased.connect(self.reader_seek_slider)
+        controls.addWidget(self.reader_position, 1)
+        self.reader_clock = QLabel('0:00 / 0:00')
+        controls.addWidget(self.reader_clock)
+        l.addLayout(controls)
+
+        self.reader_folder = None
+        self.reader_timeline = []
+        self.reader_current = -1
+        self.reader_voice_manifest = None
+        self.reader_wav_path = None
+        self.reader_audio = None
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            self.reader_audio = QMediaPlayer(self)
+            self.reader_output = QAudioOutput(self)
+            self.reader_output.setVolume(0.9)
+            self.reader_audio.setAudioOutput(self.reader_output)
+            self.reader_audio.positionChanged.connect(self.reader_position_changed)
+            self.reader_audio.durationChanged.connect(
+                lambda ms: self.reader_position.setMaximum(max(0, ms)))
+            self.reader_audio.errorOccurred.connect(self.reader_playback_error)
+        except ImportError:
+            self.reader_summary.setText(
+                'Qt multimedia support is unavailable. Install the matching PySide6 QtMultimedia component.')
+
+    def reader_refresh_books(self):
+        """Refresh eligible books while preserving the selected book where possible."""
+        selected = self.reader_book.currentData()
+        self.reader_book.blockSignals(True)
+        self.reader_book.clear()
+        for book in self.store.books():
+            self.reader_book.addItem(f"{book['title']} — {book['author']}", book['id'])
+        idx = self.reader_book.findData(selected)
+        if idx >= 0:
+            self.reader_book.setCurrentIndex(idx)
+        self.reader_book.blockSignals(False)
+        self.reader_book_changed()
+
+    def reader_book_changed(self, *_):
+        """Locate narrator-specific manifests belonging to the selected EPUB."""
+        self.reader_stop()
+        self.reader_voice.blockSignals(True)
+        self.reader_voice.clear()
+        book_id = self.reader_book.currentData()
+        if book_id is not None:
+            book = self.store.book(book_id)
+            if book:
+                try:
+                    self.converter = self.converter or load_converter()
+                    base = self.converter.book_folder(Path(book['path']))
+                    manifest_paths = [base / 'manifest.json',
+                                      *sorted((base / 'voices').glob('*/manifest.json'))]
+                    for path in manifest_paths:
+                        if path.is_file():
+                            info = json.loads(path.read_text(encoding='utf-8'))
+                            self.reader_voice.addItem(
+                                voice_name(info.get('voice_path')), str(path))
+                except (OSError, ValueError, TypeError) as exc:
+                    self.reader_summary.setText('Cannot load narrator manifests: ' + str(exc))
+        self.reader_voice.blockSignals(False)
+        self.reader_voice_changed()
+
+    def reader_voice_changed(self, *_):
+        """Select only chapters whose assembled WAV currently exists."""
+        self.reader_stop()
+        self.reader_section.blockSignals(True)
+        self.reader_section.clear()
+        self.reader_voice_manifest = None
+        selected = self.reader_voice.currentData()
+        if selected:
+            try:
+                self.reader_voice_manifest = Path(selected)
+                manifest = json.loads(self.reader_voice_manifest.read_text(encoding='utf-8'))
+                for key, chapter in sorted(manifest.get('chapters', {}).items(),
+                                           key=lambda value: int(value[0])):
+                    if isinstance(chapter, dict) and Path(chapter.get('wav', '')).is_file():
+                        self.reader_section.addItem(
+                            f"{int(key):03d} — {chapter.get('title', '')}", int(key))
+            except (OSError, ValueError, TypeError) as exc:
+                self.reader_summary.setText('Cannot inspect chapters: ' + str(exc))
+        self.reader_section.blockSignals(False)
+        self.reader_section_changed()
+
+    def reader_section_changed(self, *_):
+        """Load saved chunk text and its estimated seek points for one chapter."""
+        self.reader_stop()
+        self.reader_current = -1
+        self.reader_timeline = []
+        self.reader_wav_path = None
+        self.reader_text.clear()
+        chapter = self.reader_section.currentData()
+        if chapter is None or self.reader_voice_manifest is None:
+            self.reader_summary.setText('No completed chapter selected.')
+            return
+        try:
+            self.reader_folder = self.reader_voice_manifest.parent
+            data = read_chapter(self.reader_folder, chapter)
+            self.reader_timeline = data['chunks']
+            self.reader_wav_path = data['wav']
+            # Keep exactly one text block per chunk for cheap seeking by click.
+            self.reader_text.setPlainText('\n'.join(c['text'] for c in self.reader_timeline))
+            self.reader_summary.setText(
+                f"{data['title']} · {len(self.reader_timeline)} chunks · "
+                f"{data['timing']}. Text reflects saved narration and may contain "
+                'pronunciation substitutions.')
+            self.reader_position.setMaximum(data['duration_ms'])
+            if self.reader_audio is not None:
+                self.reader_audio.setSource(QUrl.fromLocalFile(self.reader_wav_path))
+            self.reader_position_changed(0)
+        except Exception as exc:
+            self.reader_summary.setText('Read Along cannot load this chapter: ' + str(exc))
+
+    def reader_toggle(self):
+        """Play or pause the assembled chapter WAV through QtMultimedia."""
+        if self.reader_audio is None or not self.reader_wav_path:
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+        if self.reader_audio.playbackState() == QMediaPlayer.PlayingState:
+            self.reader_audio.pause()
+        else:
+            self.reader_audio.play()
+
+    def reader_stop(self):
+        """Stop playback before leaving or switching the active chapter."""
+        player = getattr(self, 'reader_audio', None)
+        if player is not None:
+            player.stop()
+
+    def reader_playback_error(self, *_):
+        """Report backend playback errors without touching audio files."""
+        if self.reader_audio is not None:
+            self.reader_summary.setText('Audio playback problem: ' + self.reader_audio.errorString())
+
+    def reader_seek_slider(self):
+        """Seek only after the user releases the chapter scrubber."""
+        if self.reader_audio is not None and self.reader_wav_path:
+            self.reader_audio.setPosition(self.reader_position.value())
+
+    def reader_position_changed(self, ms):
+        """Update the clock and highlight one transcript block per current chunk."""
+        if not self.reader_position.isSliderDown():
+            self.reader_position.setValue(ms)
+        total = self.reader_position.maximum()
+        self.reader_clock.setText(
+            f"{ms//60000}:{(ms//1000)%60:02d} / {total//60000}:{(total//1000)%60:02d}")
+        idx = chunk_at(self.reader_timeline, ms)
+        if idx == self.reader_current or idx < 0:
+            return
+        self.reader_current = idx
+        from PySide6.QtWidgets import QTextEdit
+        from PySide6.QtGui import QTextCursor, QColor
+        highlight = QTextEdit.ExtraSelection()
+        highlight.cursor = QTextCursor(self.reader_text.document().findBlockByNumber(idx))
+        highlight.cursor.select(QTextCursor.BlockUnderCursor)
+        highlight.format.setBackground(QColor(80, 145, 205, 90))
+        self.reader_text.setExtraSelections([highlight])
+        self.reader_text.setTextCursor(highlight.cursor)
+        self.reader_text.ensureCursorVisible()
+
+    def reader_seek_chunk(self, block):
+        """Click a narration chunk to seek to its approximate beginning."""
+        if self.reader_audio is not None and 0 <= block < len(self.reader_timeline):
+            self.reader_audio.setPosition(self.reader_timeline[block]['start_ms'])
+
+    def eventFilter(self, obj, event):
+        """Capture only transcript clicks; defer every other event to Qt."""
+        from PySide6.QtCore import QEvent
+        if (hasattr(self, 'reader_text') and obj is self.reader_text.viewport()
+                and event.type() == QEvent.MouseButtonRelease):
+            block = self.reader_text.cursorForPosition(event.position().toPoint()).blockNumber()
+            self.reader_seek_chunk(block)
+        return super().eventFilter(obj, event)
+
+    def reader_open_editor(self):
+        """Jump to the existing non-destructive editor for the selected chapter."""
+        if not self.reader_wav_path or self.reader_book.currentData() is None:
+            return
+        idx = self.review_book.findData(self.reader_book.currentData())
+        if idx < 0:
+            QMessageBox.information(self, 'Book not in Review',
+                                    'Select the same book in Review audio first.')
+            return
+        self.review_book.setCurrentIndex(idx)
+        self.refresh_review()
+        selected_path = str(Path(self.reader_wav_path).resolve())
+        for row in range(self.review_table.rowCount()):
+            cell = self.review_table.item(row, 0)
+            if cell and str(Path(str(cell.data(Qt.UserRole))).resolve()) == selected_path:
+                self.review_table.selectRow(row)
+                self.open_chunk_editor()
+                return
+        QMessageBox.information(self, 'Chapter unavailable',
+                                'The current chapter does not appear in Review audio.')
 
     def make_settings_page(self):
         """Build optional MySQL, cache, and application settings controls."""
