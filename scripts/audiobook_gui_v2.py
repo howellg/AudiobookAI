@@ -2358,6 +2358,97 @@ class Studio(QMainWindow):
         first = self.job_table.item(r, 0) if r >= 0 else None
         return first.data(Qt.UserRole) if first else None
 
+    def recover_interrupted(self):
+        """Requeue interrupted parts after non-destructive dependency checks."""
+        if self.proc is not None:
+            QMessageBox.information(self, 'Queue busy',
+                                    'Stop the active conversion before recovering interrupted jobs.')
+            return
+        items = [j for j in self.store.jobs() if j['status'] == 'interrupted']
+        if not items:
+            QMessageBox.information(self, 'No interrupted parts', 'The queue has nothing to recover.')
+            return
+        ready, blocked = [], []
+        for job in items:
+            problem = check_resume_job(job)
+            if problem:
+                blocked.append(f"#{job['id']}: {problem}")
+            else:
+                ready.append(job['id'])
+        if not ready:
+            QMessageBox.warning(self, 'Recovery blocked',
+                'No interrupted parts passed preflight:\n' + '\n'.join(blocked[:12]))
+            return
+        message = (f'Requeue {len(ready)} interrupted part(s)?\n'
+                   'Cached narration and existing WAVs will be preserved. '
+                   'The queue will NOT start automatically.')
+        if blocked:
+            message += '\n\nSkipped:\n' + '\n'.join(blocked[:10])
+        if QMessageBox.question(self, 'Recover interrupted parts', message,
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        count = self.store.requeue_interrupted(ready)
+        self.refresh_jobs()
+        self.write_log(f'Recovery: {count} interrupted part(s) requeued; {len(blocked)} skipped.')
+        self.statusBar().showMessage(f'{count} parts ready. Click Start queue when ready.')
+
+    def open_selected_diagnostic(self):
+        """Open the last bounded diagnostic log associated with one queue job."""
+        job_id = self.selected_job_id()
+        if job_id is None:
+            return
+        files = list(self.diagnostic_dir.glob(f'job_{int(job_id)}_*.log'))
+        if not files:
+            QMessageBox.information(self, 'No diagnostic log',
+                                    'No V2.8 diagnostic log has been saved for this part.')
+            return
+        latest = max(files, key=lambda p: p.stat().st_mtime)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(latest.resolve())))
+
+    def maybe_auto_metadata_backup(self):
+        """Save an incremental-time checkpoint; never block narration if it fails."""
+        try:
+            recent = latest_backup(self.backup_dir, automatic_only=True)
+            if recent and time.time() - recent.stat().st_mtime < 30 * 60:
+                return
+            path = create_metadata_backup(
+                self.store.db, ROOT / 'output', self.backup_dir,
+                read_config(), automatic=True, keep=10)
+            self.write_log(f'Automatic metadata backup verified: {path.name}')
+            self.backup_status.setText(f'Latest automatic backup: {path.name}')
+        except Exception as exc:
+            self.write_log(f'Metadata backup failed (narration unaffected): {exc}')
+            self.backup_status.setText(f'Backup error: {exc}')
+
+    def backup_metadata_now(self):
+        """Manually save a metadata backup excluded from automatic pruning."""
+        try:
+            path = create_metadata_backup(
+                self.store.db, ROOT / 'output', self.backup_dir,
+                read_config(), automatic=False)
+            self.backup_status.setText(f'Manual backup verified: {path.name}')
+            self.statusBar().showMessage(f'Metadata backup saved: {path}')
+        except Exception as exc:
+            self.error('Metadata backup failed', exc)
+
+    def verify_latest_metadata_backup(self):
+        """Verify every SHA256 member checksum; do not extract to live files."""
+        path = latest_backup(self.backup_dir)
+        if path is None:
+            QMessageBox.information(self, 'No backups', 'Create a metadata backup first.')
+            return
+        try:
+            manifest = verify_metadata_backup(path)
+            self.backup_status.setText(
+                f'Verified {path.name}: {len(manifest["sha256"])} metadata files')
+        except Exception as exc:
+            self.error('Backup verification failed', exc)
+
+    def open_metadata_backup_folder(self):
+        """Open local metadata archives for external-drive copying."""
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_dir.resolve())))
+
     def start_queue(self):
         """Start the next pending job unless paused or already generating."""
         if self.proc is not None:
