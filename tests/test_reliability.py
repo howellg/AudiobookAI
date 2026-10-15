@@ -110,8 +110,6 @@ class ReliabilityTests(unittest.TestCase):
                              "VALUES(?,?,?,?,?,?)", (str(self.root / "book.epub"),
                              "Book", "Author", 1, 10, "2026-10-15"))
             book_id = store.db.execute("SELECT id FROM books").fetchone()[0]
-            ids = [store.add_job(book_id, f"Job {i}", "[1]", f"part{i}")
-                   if False else None for i in []]  # no implicit test jobs
             first = store.add_job(book_id, "A", [1], "part_a")
             second = store.add_job(book_id, "B", [1], "part_b")
             third = store.add_job(book_id, "C", [1], "part_c")
