@@ -22,6 +22,8 @@ jobs:
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           python -m pip install "numpy>=1.24,<2" "soundfile>=0.12,<1" "EbookLib>=0.18,<1" "beautifulsoup4>=4.12,<5" "lxml>=5,<7" "PySide6>=6.7,<7"
+          # CPU-only PyTorch for simulated narration/rebuild tests; no GPU needed.
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Compile scripts
         run: python -m compileall -q scripts tests
       - name: Run offline suite
