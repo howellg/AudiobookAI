@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.8.0 (unreleased) — Reliability & Recovery preview
+## 2.8.0 — Reliability & Recovery
 
 - Safely requeue only validated interrupted jobs, retaining cached generation progress.
 - Save bounded per-job converter logs with diagnostic failure hints.
