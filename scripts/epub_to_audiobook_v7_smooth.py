@@ -12,6 +12,8 @@ Usage:
 Reads ordinary, accessible (DRM-free) EPUB files. EPUB structure varies; inspect
 first to spot a misidentified table of contents, footnotes, or front matter.
 """
+
+# MAINTAINER NOTE: Standalone V7 converter prototype. Studio uses `epub_to_audiobook_v7_studio.py`, which adds queue events and narrator-specific paths.
 from __future__ import annotations
 
 import argparse
@@ -33,6 +35,7 @@ ENGINE_FILE = Path(__file__).with_name("test_five_minutes_v7_smooth.py")
 
 @dataclass
 class Section:
+    """One ordered EPUB segment with source metadata and its extracted paragraphs."""
     index: int
     title: str
     paragraphs: list[str]
@@ -40,10 +43,12 @@ class Section:
 
     @property
     def text(self):
+        """Join source paragraphs with blank lines to preserve paragraph boundaries."""
         return "\n\n".join(self.paragraphs)
 
 
 def safe_name(s: str, length=80):
+    """Convert a title or filename into a filesystem-safe basename."""
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", s).strip("_")[:length] or "untitled"
 
 
@@ -58,6 +63,7 @@ ROMAN_ONLY_HEADING = re.compile(r"^\s*([IVXLCDM]+)\s*[.:]?\s*$", re.IGNORECASE)
 
 
 def is_chapter_heading(text: str, tag_name: str = "") -> bool:
+    """Recognize numbered headings while rejecting ordinary narrative references."""
     text = re.sub(r"\s+", " ", text).strip()
     if CHAPTER_HEADING.fullmatch(text):
         return True
@@ -66,6 +72,7 @@ def is_chapter_heading(text: str, tag_name: str = "") -> bool:
 
 
 def load_epub(epub_path: Path):
+    """Read readable EPUB spine items in order and extract section metadata and prose."""
     try:
         from ebooklib import epub, ITEM_DOCUMENT
         from bs4 import BeautifulSoup
@@ -74,6 +81,7 @@ def load_epub(epub_path: Path):
 
     book = epub.read_epub(str(epub_path))
     def meta(name, fallback):
+        """Read a Dublin Core metadata value or use the provided fallback."""
         vals = book.get_metadata("DC", name)
         return (str(vals[0][0]).strip() if vals else fallback) or fallback
 
@@ -84,6 +92,7 @@ def load_epub(epub_path: Path):
     block_tags = heading_tags | {"p", "blockquote"}
 
     def add_section(name, paragraphs, source):
+        """Append a nonempty EPUB section and assign the next reading-order index."""
         if paragraphs:
             sections.append(Section(len(sections) + 1, name, paragraphs, source))
 
@@ -157,6 +166,7 @@ def load_epub(epub_path: Path):
 
 
 def load_engine():
+    """Load the narration module lazily so inspection does not load the GPU model."""
     if not ENGINE_FILE.exists():
         raise SystemExit(f"Missing V6 engine: {ENGINE_FILE}\nPlace your working test_five_minutes_v6_normal_speed.py alongside this script.")
     spec = importlib.util.spec_from_file_location("audiobook_v6_engine", ENGINE_FILE)
@@ -171,11 +181,13 @@ def load_engine():
 
 def book_folder(path: Path):
     # Stable for a particular file path, and distinct from other copies/titles.
+    """Choose a stable output directory for the source book."""
     fingerprint = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
     return OUT_ROOT / f"{safe_name(path.stem, 60)}_{fingerprint}_smooth_v7"
 
 
 def chapter_signature(engine, section):
+    """Hash the text, narrator, and assembly settings used to build a chapter."""
     chunks = engine.make_chunks(section.text)
     signature = {"chunks": [(c.text, c.boundary, c.dialogue) for c in chunks],
                  "voice": [engine.cache_key(c.text) for c in chunks],
@@ -188,12 +200,14 @@ def chapter_signature(engine, section):
 
 
 def atomic_json(path: Path, payload):
+    """Write JSON through a temporary file so interrupted writes leave the prior file intact."""
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
 
 
 def read_manifest(path: Path):
+    """Read the previous chapter manifest, tolerating an absent or invalid one."""
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -203,6 +217,7 @@ def read_manifest(path: Path):
 
 
 def chapters_selected(expr: str | None, max_section: int):
+    """Parse a comma-separated list of chapter indices and inclusive ranges."""
     if not expr:
         return list(range(1, max_section+1))
     selected = set()
@@ -222,11 +237,13 @@ def chapters_selected(expr: str | None, max_section: int):
 
 
 def chapter_path(out: Path, index: int):
+    """Build the zero-padded chapter WAV path for a given EPUB section."""
     return out / "chapters" / f"{index:04d}.wav"
 
 
 def generate_sections(epub_path: Path, title, author, sections, chosen, out: Path):
     # Imports the proven V6 engine only when generation is requested.
+    """Generate requested sections as WAV files, reusing valid cached speech."""
     engine = load_engine()
     import torchaudio as ta
     import torch
@@ -274,14 +291,17 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
 
 
 def ffmeta_escape(s: str):
+    """Escape special characters for FFmpeg chapter metadata."""
     return s.replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;").replace("#", "\\#").replace("\n", " ")
 
 
 def ffconcat_quote(path: Path):
+    """Quote a file path for FFmpeg concat-list syntax."""
     return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
 
 
 def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path):
+    """Mux completed section recordings into an AAC M4B with chapter markers."""
     manifest = read_manifest(out / "manifest.json")
     recorded = manifest.get("chapters", {})
     absent = [i for i in chosen if not chapter_path(out, i).is_file() or str(i) not in recorded]
@@ -325,6 +345,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path):
 
 
 def main():
+    """Parse command-line arguments and dispatch the requested operation."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["inspect", "convert", "resume", "export"])
     parser.add_argument("epub", type=Path, help="EPUB file path")

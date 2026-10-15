@@ -18,19 +18,25 @@ from audiobookai_storage import (Store, MySQLMirror, default_config, read_config
 
 
 class Section:
+    """One ordered EPUB segment with source metadata and its extracted paragraphs."""
     def __init__(self, index, title, text, source='source.xhtml'):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.index, self.title, self.text, self.source = index, title, text, source
 
 
 class StoreTests(unittest.TestCase):
+    """Regression cases for store behavior."""
     def setUp(self):
+        """Prepare isolated fixtures and temporary data for each test."""
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / 'audiobookai_studio.sqlite3'
 
     def tearDown(self):
+        """Release fixtures and temporary resources after each test."""
         self.tmp.cleanup()
 
     def test_existing_v2_migrates_without_losing_jobs(self):
+        """Verify existing v2 migrates without losing jobs behavior."""
         old = sqlite3.connect(self.path)
         old.executescript('''
             CREATE TABLE books(id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE,
@@ -59,6 +65,7 @@ class StoreTests(unittest.TestCase):
         reopened.close()
 
     def test_import_backfill_queue_progress_and_deletion(self):
+        """Verify import backfill queue progress and deletion behavior."""
         store = Store(self.path)
         sections = [Section(1,'Chapter I','Some initial content'),
                     Section(2,'Chapter II','More words in chapter two')]
@@ -82,6 +89,7 @@ class StoreTests(unittest.TestCase):
         store.close()
 
     def test_backfill_existing_sections(self):
+        """Verify backfill existing sections behavior."""
         store = Store(self.path)
         book = store.import_book('/tmp/a.epub','A','B',[Section(1,'One','Hi')])
         store.db.execute('DELETE FROM book_sections WHERE book_id=?',(book,))
@@ -91,6 +99,7 @@ class StoreTests(unittest.TestCase):
         store.close()
 
     def test_config_excludes_secrets(self):
+        """Ensure saved public settings never serialize passwords and receive restrictive permissions."""
         cfg = default_config()
         cfg['mysql'].update(enabled=True, password='SECRET_DO_NOT_WRITE',user='app')
         target = Path(self.tmp.name) / 'studio_config.json'
@@ -101,38 +110,53 @@ class StoreTests(unittest.TestCase):
 
 
 class DummyCursor:
+    """Minimal cursor mock for schema-migration and SQL transaction assertions."""
     def __init__(self, conn):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.conn = conn
     def execute(self, sql, params=None):
+        """Record a SQL statement instead of sending it to a real server."""
         self.conn.statements.append((sql,params))
     def executemany(self, sql, params):
+        """Record all SQL argument tuples to verify batch inserts."""
         self.conn.statements.append((sql,list(params)))
     def fetchone(self):
+        """Simulate an absent database row to exercise the migration path."""
         return None  # Simulate MySQL table missing the new voice_path column.
     def close(self):
+        """Simulate closing a database cursor or connection."""
         pass
 
 
 class DummyConnection:
+    """Stateful fake connection that tracks commits, rollbacks, and close calls."""
     def __init__(self):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.statements = []
         self.commits = 0
         self.rollbacks = 0
         self.is_open = True
     def cursor(self):
+        """Return a recording cursor attached to the fake connection."""
         return DummyCursor(self)
     def commit(self):
+        """Count transaction commits without writing to a real database."""
         self.commits += 1
     def rollback(self):
+        """Count transaction rollbacks for failure-path assertions."""
         self.rollbacks += 1
     def close(self):
+        """Simulate closing a database cursor or connection."""
         self.is_open = False
     def is_connected(self):
+        """Report whether this fake MySQL connection is still open."""
         return self.is_open
 
 
 class MySQLMirrorTests(unittest.TestCase):
+    """Use a fake MySQL connector to test transactional mirroring."""
     def test_generates_transactional_mysql_snapshot(self):
+        """Check that mirrored records are synchronized in a single transaction."""
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp)/'local.sqlite3')
             book = store.import_book('/tmp/a.epub','Title','Author',

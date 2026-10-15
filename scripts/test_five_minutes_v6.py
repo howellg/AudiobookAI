@@ -9,6 +9,8 @@ Optional:
 
 Raw speech is cached by exact input text. Changing speed/pauses never invalidates it.
 """
+
+# MAINTAINER NOTE: Historical V6 narration experiment, retained as a reference for early generation and caching behavior.
 import argparse
 import csv
 import os
@@ -56,12 +58,14 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass
 class Chunk:
+    """One speakable text unit plus the boundary context needed for audio assembly."""
     text: str
     boundary: str = "sentence"  # boundary AFTER this chunk
     dialogue: bool = False
 
 
 def is_dialogue(text: str) -> bool:
+    """Identify whether a text fragment looks like dialogue."""
     return text.lstrip().startswith(('"', '“', '‘'))
 
 
@@ -71,6 +75,7 @@ def paragraph_groups(text: str) -> list[tuple[str, bool]]:
     paragraphs = []
     current = []
     def flush():
+        """Emit a cleaned paragraph/scene group and reset the current buffer."""
         if current:
             p = " ".join(current).strip()
             if p:
@@ -116,6 +121,7 @@ def split_sentences(text: str) -> list[str]:
 
 
 def split_long(text: str, max_words: int = MAX_CHUNK_WORDS) -> list[str]:
+    """Split oversized prose into bounded chunks before GPU generation."""
     if len(text.split()) <= max_words:
         return [text]
     phrases = re.split(r'(?<=[,;:—–])\s+', text)
@@ -140,6 +146,7 @@ def split_long(text: str, max_words: int = MAX_CHUNK_WORDS) -> list[str]:
 
 
 def make_chunks(text: str) -> list[Chunk]:
+    """Produce ordered narration chunks with sentence and paragraph boundary metadata."""
     groups = paragraph_groups(text)
     output = []
     for paragraph, is_heading in groups:
@@ -176,6 +183,7 @@ def make_chunks(text: str) -> list[Chunk]:
 
 def cache_key(text: str) -> str:
     # Exactly matches Tests 3/4, including the voice file mtime.
+    """Build the cache identity for this text and the current narration configuration."""
     st = VOICE_FILE.stat()
     signature = (f"chatterbox-tts|{text}|{EXAGGERATION}|{CFG_WEIGHT}|"
                  f"{VOICE_FILE.resolve()}|{st.st_size}|{st.st_mtime_ns}")
@@ -184,11 +192,13 @@ def cache_key(text: str) -> str:
 
 def readable_filename(index: int, chunk: Chunk) -> str:
     # The number corresponds to --list-chunks and --regen.
+    """Create an index-friendly name for a numbered chunk recording."""
     slug = re.sub(r'[^a-zA-Z0-9]+', '_', chunk.text).strip('_')[:72]
     return f'{index:03d}_{slug or "empty"}.wav'
 
 
 def write_manifest(chunks: list[Chunk]) -> None:
+    """Save a human-readable map from chunk numbers to their source text."""
     READABLE_DIR.mkdir(parents=True, exist_ok=True)
     # Remove old symlinks only. Never remove genuine files.
     for old in READABLE_DIR.glob('*.wav'):
@@ -206,6 +216,7 @@ def write_manifest(chunks: list[Chunk]) -> None:
 
 
 def link_chunk(n: int, chunk: Chunk) -> None:
+    """Expose a chunk recording under a readable index name for review."""
     READABLE_DIR.mkdir(parents=True, exist_ok=True)
     link = READABLE_DIR / readable_filename(n, chunk)
     raw_path = CACHE_DIR / f'{cache_key(chunk.text)}.wav'
@@ -218,6 +229,7 @@ def link_chunk(n: int, chunk: Chunk) -> None:
 
 def clean_tensor(wav: torch.Tensor) -> torch.Tensor:
     # clone() is required to avoid in-place modifications to inference tensors.
+    """Normalize generated audio into the channel and sample shape expected by assembly."""
     wav = wav.detach().to(device='cpu', dtype=torch.float32).clone()
     if wav.ndim == 1:
         wav = wav.unsqueeze(0)
@@ -233,8 +245,10 @@ class OverlongGeneration(Exception):
 def capped_generate(model, text: str):
     # Installed Chatterbox hard-codes 1000 T3 tokens inside generate().
     # Limit that internal call to avoid attention-cache growth past GTX 1650 VRAM.
+    """Generate audio with a conservative token ceiling to avoid runaway inference."""
     original = model.t3.inference
     def capped_inference(*args, **kwargs):
+        """Override the model token limit for this call without changing its shared configuration."""
         kwargs['max_new_tokens'] = min(kwargs.get('max_new_tokens') or TOKEN_CAP, TOKEN_CAP)
         return original(*args, **kwargs)
     model.t3.inference = capped_inference
@@ -247,6 +261,7 @@ def capped_generate(model, text: str):
 
 
 def split_for_retry(text: str) -> tuple[str, str]:
+    """Find a roughly balanced phrase boundary when a chunk needs shorter retries."""
     words = text.split()
     mid = len(words) // 2
     candidates = [i for i in range(3, len(words)-2) if words[i-1].endswith((',', ';', ':', '—', '–', '.', '?', '!'))]
@@ -256,6 +271,7 @@ def split_for_retry(text: str) -> tuple[str, str]:
 
 
 def generate_cached(model, text: str, sr: int, depth: int = 0) -> torch.Tensor:
+    """Load compatible cached speech or synthesize, validate, and cache a replacement."""
     path = CACHE_DIR / f'{cache_key(text)}.wav'
     if path.is_file():
         raw, file_sr = ta.load(str(path))
@@ -295,6 +311,7 @@ def generate_cached(model, text: str, sr: int, depth: int = 0) -> torch.Tensor:
 
 
 def edge_silence(wav: torch.Tensor, sr: int, at_end: bool) -> float:
+    """Measure low-amplitude padding at one edge of an audio clip."""
     n = min(wav.shape[-1], round(SILENCE_SCAN_SECONDS * sr))
     samples = wav[:, -n:] if at_end else wav[:, :n]
     active = (samples.abs().amax(0) > SILENCE_THRESHOLD).nonzero().flatten()
@@ -304,6 +321,7 @@ def edge_silence(wav: torch.Tensor, sr: int, at_end: bool) -> float:
 
 
 def target_pause(cur: Chunk, nxt: Chunk) -> float:
+    """Choose the desired silence between two chunks using boundary metadata."""
     pauses = {'comma': FINAL_COMMA_PAUSE, 'sentence': FINAL_SENTENCE_PAUSE,
               'paragraph': FINAL_PARAGRAPH_PAUSE, 'scene': FINAL_SCENE_PAUSE}
     target = pauses.get(cur.boundary, FINAL_SENTENCE_PAUSE)
@@ -339,6 +357,7 @@ def assemble(chunks: list[Chunk], recordings: list[torch.Tensor], sr: int) -> tu
 
 
 def main():
+    """Parse command-line arguments and dispatch the requested operation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--list-chunks', action='store_true', help='Preview chunk IDs and text without loading Chatterbox')
     parser.add_argument('--regen', default='', help='Comma-separated 1-based chunk numbers to regenerate')

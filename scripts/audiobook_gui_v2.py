@@ -11,6 +11,8 @@ Dependencies (in the existing Chatterbox venv):
 SQLite stays the crash-safe source of truth. A dedicated MySQL schema is a
 queryable mirror, so MySQL outages do not interrupt narration or the queue.
 """
+
+# MAINTAINER NOTE: Current PySide6 desktop application for importing EPUBs, queueing narration, reviewing audio, and managing optional sync.
 from __future__ import annotations
 
 import importlib.util
@@ -49,6 +51,7 @@ EVENT_PREFIX = 'AUDIOBOOKAI_EVENT '
 
 
 def fmt_seconds(seconds):
+    """Format a number of elapsed or estimated seconds for progress labels."""
     if seconds is None:
         return '—'
     secs = max(0, int(seconds))
@@ -58,6 +61,7 @@ def fmt_seconds(seconds):
 
 
 def fmt_size(n):
+    """Render a byte count in human-readable binary units."""
     n = float(n)
     for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
         if n < 1024 or unit == 'TiB':
@@ -66,12 +70,14 @@ def fmt_size(n):
 
 
 def size_on_disk(folder):
+    """Sum sizes of files below a folder for the storage display."""
     if not folder.is_dir():
         return 0
     return sum(p.stat().st_size for p in folder.rglob('*') if p.is_file())
 
 
 def load_converter():
+    """Load the current Studio EPUB converter without importing TTS at GUI startup."""
     if not CONVERTER_FILE.is_file():
         raise FileNotFoundError(f'Missing backend: {CONVERTER_FILE}')
     spec = importlib.util.spec_from_file_location('audiobookai_v7_studio_backend', CONVERTER_FILE)
@@ -82,6 +88,7 @@ def load_converter():
 
 
 def title_label(text, size=20):
+    """Create a consistent bold page heading with the requested font size."""
     label = QLabel(text)
     font = QFont()
     font.setPointSize(size)
@@ -91,6 +98,7 @@ def title_label(text, size=20):
 
 
 def mk_button(label, handler, tooltip=None):
+    """Build a button and connect its action to a Qt signal."""
     btn = QPushButton(label)
     btn.clicked.connect(handler)
     if tooltip:
@@ -99,6 +107,7 @@ def mk_button(label, handler, tooltip=None):
 
 
 def item(text, data=None, checked=None):
+    """Build a read-only table cell, optionally with stored data or a checkbox."""
     it = QTableWidgetItem(str(text))
     if data is not None:
         it.setData(Qt.UserRole, data)
@@ -111,11 +120,14 @@ def item(text, data=None, checked=None):
 
 
 class Studio(QMainWindow):
+    """Main Qt window coordinating the local library, queue, subprocesses, and review UI."""
     def __init__(self):
+        """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
         self.setWindowTitle('AudiobookAI Studio — V2.4 · Production tools')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
+        # SQLite owns queue state; MySQL is only a separately synchronized copy.
         self.store = Store(DB_FILE)
         self.store.on_change = self.mark_mysql_dirty
         self.mysql_cfg = read_config()['mysql']
@@ -129,6 +141,7 @@ class Studio(QMainWindow):
         self.current_book_id = None
         self.sections = []
         self.book_cache = {}
+        # The converter runs in another process; UI callbacks only consume its status.
         self.proc = None
         self.active_job_id = None
         self.stop_requested = False
@@ -212,6 +225,8 @@ class Studio(QMainWindow):
             shortcut = QShortcut(QKeySequence(f'Alt+{i+1}'), self)
             shortcut.activated.connect(lambda idx=i: self.change_page(idx))
             self.shortcuts.append(shortcut)
+        # Preserve the existing timer-disable workaround from the uploaded project.
+        # Do not reenable it as a side effect of a documentation-only change.
         self.monitor = QTimer(self)
         # # self.monitor.timeout.connect(self.tick)  # crash isolation  # crash isolation
         self.monitor.start(1000)
@@ -224,6 +239,7 @@ class Studio(QMainWindow):
         QTimer.singleShot(500, self.connect_saved_mysql)
 
     def page_base(self, heading, intro, scroll=False):
+        """Create a page header and layout, optionally using a scrolling container."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(23, 18, 23, 21)
@@ -244,6 +260,7 @@ class Studio(QMainWindow):
         return layout
 
     def change_page(self, index):
+        """Select the visible page, update sidebar selection, and remember navigation state."""
         self.stack.setCurrentIndex(index)
         self.prefs.setValue('last_page', index)
         for i, button in enumerate(self.nav):
@@ -254,6 +271,7 @@ class Studio(QMainWindow):
             self.refresh_settings()
 
     def make_library_page(self):
+        """Build the imported-books table and library actions."""
         l = self.page_base('Your library', 'Import DRM-free EPUB books once. Your job history stays available across restarts.')
         bar = QHBoxLayout()
         bar.addWidget(mk_button('＋ Import EPUB', self.import_dialog))
@@ -278,6 +296,7 @@ class Studio(QMainWindow):
         l.addWidget(self.library_foot)
 
     def reload_voices(self, preferred=None):
+        """Refresh narrator choices and retain the requested selection where possible."""
         if not hasattr(self, 'voice_combo'):
             return
         old = str(preferred) if preferred else self.voice_combo.currentData()
@@ -296,10 +315,12 @@ class Studio(QMainWindow):
         self.voice_changed()
 
     def selected_narrator(self):
+        """Return the WAV currently chosen in the Generate view."""
         selected = self.voice_combo.currentData()
         return Path(selected) if selected else DEFAULT_VOICE
 
     def voice_changed(self, *_):
+        """Remember the narrator preference for the currently selected book."""
         if not hasattr(self, 'voice_hint'):
             return
         path = self.selected_narrator()
@@ -311,6 +332,7 @@ class Studio(QMainWindow):
                                 '▶ Hear sample plays the reference WAV, not synthesized narration.')
 
     def restore_voice_for_book(self, book_id):
+        """Load the book-specific narrator preference into the selector."""
         saved = self.prefs.value(f'voice_for_book/{book_id}', '')
         index = self.voice_combo.findData(str(saved)) if saved else 0
         self.voice_combo.blockSignals(True)
@@ -319,6 +341,7 @@ class Studio(QMainWindow):
         self.voice_changed()
 
     def import_narrator(self):
+        """Prompt for a WAV and copy a validated reference into the local voice library."""
         selection, _ = QFileDialog.getOpenFileName(self, 'Choose narrator reference WAV',
                                                    str(Path.home()), 'WAV audio (*.wav *.WAV)')
         if not selection:
@@ -331,6 +354,7 @@ class Studio(QMainWindow):
             self.error('Narrator WAV import failed', exc)
 
     def play_narrator(self):
+        """Open the chosen narrator sample in the desktop audio player."""
         voice = self.selected_narrator()
         if not voice.is_file():
             self.error('Narrator sample missing', f'File not found: {voice}')
@@ -338,10 +362,12 @@ class Studio(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(voice)))
 
     def open_voices_folder(self):
+        """Show the local narrator library in the file manager."""
         VOICE_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(VOICE_DIR)))
 
     def change_queued_narrator(self):
+        """Apply a narrator to an unstarted job; reject changes to active jobs."""
         job_id = self.selected_job_id()
         if job_id is None:
             QMessageBox.information(self, 'Select a part', 'Select a queued part in the queue first.')
@@ -361,6 +387,7 @@ class Studio(QMainWindow):
             self.error('Unable to change queued narrator', exc)
 
     def make_generate_page(self):
+        """Build chapter selection, narrator controls, and batch queue options."""
         l = self.page_base('Prepare a conversion', 'Select story chapters or EPUB sections. Export them as one M4B or as separate numbered parts.')
         row = QHBoxLayout()
         row.addWidget(QLabel('Book:'))
@@ -448,6 +475,7 @@ class Studio(QMainWindow):
         l.addLayout(lower)
 
     def make_queue_page(self):
+        """Build job controls, progress readouts, log viewer, and job table."""
         l = self.page_base('Conversion queue', 'Jobs and progress persist locally and sync to MySQL when connected. Interrupted jobs reuse V7 chunk caches.')
         bar = QHBoxLayout()
         bar.addWidget(mk_button('▶ Start queue', self.start_queue))
@@ -528,6 +556,7 @@ class Studio(QMainWindow):
         l.addWidget(self.logs, 1)
 
     def make_review_page(self):
+        """Build finished-export playback and chapter review controls."""
         l = self.page_base('Review your audio', 'Review, regenerate or restore individual voice chunks, inspect audio, and rebuild M4Bs without re-running complete chapters.')
         row = QHBoxLayout()
         row.addWidget(QLabel('Book:'))
@@ -565,6 +594,7 @@ class Studio(QMainWindow):
         l.addWidget(note)
 
     def make_settings_page(self):
+        """Build optional MySQL, cache, and application settings controls."""
         l = self.page_base('Settings & MySQL',
             'Your existing SQLite library remains the safe source of truth. Connect MySQL to keep '
             'a queryable, automatically refreshed copy of books, chapters, jobs and progress.', scroll=True)
@@ -657,6 +687,7 @@ class Studio(QMainWindow):
         l.addStretch()
 
     def mark_mysql_dirty(self):
+        """Flag the optional SQL mirror for a later refresh after a SQLite write."""
         self.mysql_sync_pending = True
         if self.mysql_mirror is not None:
             self.mysql_mirror.dirty = True
@@ -664,6 +695,7 @@ class Studio(QMainWindow):
             self.mirror_timer.start(1800)
 
     def mysql_form_config(self):
+        """Read nonsecret database connection fields from the Settings form."""
         return {'enabled': True, 'host': self.mysql_host.text().strip(),
                 'port': self.mysql_port.value(),
                 'database': self.mysql_database.text().strip(),
@@ -671,6 +703,7 @@ class Studio(QMainWindow):
                 'use_keyring': self.mysql_remember.isChecked()}
 
     def update_mysql_status(self, explanation=None):
+        """Render the current MySQL state without changing canonical SQLite data."""
         if self.mysql_mirror and self.mysql_mirror.last_error:
             text = 'MySQL sync failed — your local SQLite queue is safe'
             brief = 'MySQL: sync pending'
@@ -693,12 +726,14 @@ class Studio(QMainWindow):
             self.mysql_status_label.setText(text)
 
     def connect_saved_mysql(self):
+        """Attempt reconnect on launch when settings and credentials are available."""
         if self.mysql_cfg.get('enabled') and self.mysql_password is not None:
             self.maybe_sync_mysql(force=False)
         else:
             self.update_mysql_status()
 
     def connect_mysql_from_settings(self):
+        """Validate the entered credentials and synchronize the local catalogue."""
         cfg = self.mysql_form_config()
         if not all((cfg['host'], cfg['user'], cfg['database'])):
             QMessageBox.warning(self, 'Missing connection details', 'Host, database, and user are required.')
@@ -737,6 +772,7 @@ class Studio(QMainWindow):
         self.statusBar().showMessage(f'MySQL synchronized: {counts[0]} books, {counts[1]} jobs.')
 
     def maybe_sync_mysql(self, force=False):
+        """Perform a rate-limited mirror update when local metadata has changed."""
         if not self.mysql_cfg.get('enabled') or self.mysql_password is None:
             self.update_mysql_status()
             return
@@ -764,6 +800,7 @@ class Studio(QMainWindow):
                     f'{exc}\n\nAudiobook generation continues normally with local SQLite.')
 
     def disconnect_mysql(self):
+        """Disable optional synchronization and release the mirror connection."""
         if self.mysql_mirror:
             self.mysql_mirror.disconnect()
         self.mysql_mirror = None
@@ -776,6 +813,7 @@ class Studio(QMainWindow):
 
     @staticmethod
     def setup_table(table):
+        """Apply consistent table selection, resizing, and edit restrictions."""
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -784,6 +822,7 @@ class Studio(QMainWindow):
         table.horizontalHeader().setStretchLastSection(True)
 
     def error(self, title, message):
+        """Display a modal error dialog with a useful title and explanation."""
         QMessageBox.critical(self, title, str(message))
         self.write_log(f'ERROR: {message}')
 
@@ -791,9 +830,11 @@ class Studio(QMainWindow):
         # QPlainTextEdit maintains the scroll position automatically when
         # appending; avoid retaining a transient QScrollBar wrapper after
         # appendPlainText() causes internal Qt layout/scrollbar changes.
+        """Append a converter message to the bounded log viewer."""
         self.logs.appendPlainText(str(text))
 
     def focus_search(self):
+        """Focus the search field belonging to the currently visible page."""
         page = self.stack.currentIndex()
         if page == 0:
             self.library_search.setFocus()
@@ -803,6 +844,7 @@ class Studio(QMainWindow):
             self.queue_search.setFocus()
 
     def dragEnterEvent(self, event):
+        """Allow dragged EPUB files to be accepted by the window."""
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
         if any(url.isLocalFile() and url.toLocalFile().lower().endswith('.epub') for url in urls):
             event.acceptProposedAction()
@@ -810,6 +852,7 @@ class Studio(QMainWindow):
             event.ignore()
 
     def dropEvent(self, event):
+        """Import EPUB files dropped onto the application window."""
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()
                  if url.isLocalFile() and url.toLocalFile().lower().endswith('.epub')]
         if not paths:
@@ -824,6 +867,7 @@ class Studio(QMainWindow):
             self.import_book(path)
 
     def filter_library(self, *_):
+        """Hide library rows not matching the title or author search."""
         query = self.library_search.text().strip().casefold()
         shown = 0
         for row in range(self.library_table.rowCount()):
@@ -836,6 +880,7 @@ class Studio(QMainWindow):
         self.library_foot.setText(f'{shown} of {total} books shown · drag EPUBs into this window to import')
 
     def filter_chapters(self, *_):
+        """Filter visible chapter rows without changing their selected state."""
         query = self.chapter_search.text().strip().casefold()
         for row in range(self.section_table.rowCount()):
             index = self.section_table.item(row, 0).text()
@@ -844,11 +889,13 @@ class Studio(QMainWindow):
             self.section_table.setRowHidden(row, not visible)
 
     def select_visible(self):
+        """Check or uncheck chapters currently visible after filtering."""
         visible = {sec.index for row, sec in enumerate(self.sections)
                    if not self.section_table.isRowHidden(row)}
         self.set_checks(lambda index: index in visible)
 
     def select_range(self):
+        """Parse and apply explicit section numbers from the range input."""
         try:
             selection = set(parse_section_ranges(self.range_input.text(),
                                                 [section.index for section in self.sections]))
@@ -859,10 +906,12 @@ class Studio(QMainWindow):
         self.statusBar().showMessage(f'Selected {len(selection)} EPUB sections from your range.')
 
     def queue_from_shortcut(self):
+        """Queue the current selection via the keyboard shortcut."""
         if self.stack.currentIndex() == 1:
             self.queue_selection()
 
     def filter_queue(self, *_):
+        """Show only jobs matching the queue search and status filters."""
         wanted = self.queue_filter.currentText()
         term = self.queue_search.text().strip().casefold()
         shown = 0
@@ -876,16 +925,19 @@ class Studio(QMainWindow):
         self.queue_count.setText(f'{shown} / {self.job_table.rowCount()} jobs')
 
     def copy_log(self):
+        """Copy visible generation messages to the clipboard for debugging."""
         text = self.logs.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
             self.statusBar().showMessage('Conversion messages copied to clipboard.')
 
     def clear_log(self):
+        """Clear the displayed log without deleting on-disk audio or job history."""
         self.logs.clear()
         self.statusBar().showMessage('Log display cleared. Conversion progress and saved jobs are unchanged.')
 
     def import_dialog(self):
+        """Open the file chooser for an EPUB to add to the local library."""
         start = ROOT / 'books'
         if not start.exists():
             start = Path.home()
@@ -894,6 +946,7 @@ class Studio(QMainWindow):
             self.import_book(Path(path))
 
     def import_book(self, path):
+        """Inspect an EPUB and store its section metadata in SQLite."""
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             conv = self.converter or load_converter()
@@ -911,6 +964,7 @@ class Studio(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def refresh_books(self, select_id=None):
+        """Reload library widgets and keep the current book selection when possible."""
         books = self.store.books()
         self.library_table.setRowCount(len(books))
         for r, b in enumerate(books):
@@ -940,11 +994,13 @@ class Studio(QMainWindow):
             self.gen_details.setText('Import an EPUB to begin.')
 
     def current_library_book(self):
+        """Return the book record selected in the library table."""
         r = self.library_table.currentRow()
         first = self.library_table.item(r, 0) if r >= 0 else None
         return first.data(Qt.UserRole) if first else None
 
     def generate_selected_book(self, *_):
+        """Open the Generate page for the selected library book."""
         book_id = self.current_library_book()
         if book_id is None:
             return
@@ -952,6 +1008,7 @@ class Studio(QMainWindow):
         self.change_page(1)
 
     def remove_selected_book(self):
+        """Delete a book catalogue entry after enforcing job-history safeguards."""
         book_id = self.current_library_book()
         if book_id is None:
             return
@@ -965,12 +1022,14 @@ class Studio(QMainWindow):
             QMessageBox.warning(self, 'Cannot remove book', str(exc))
 
     def select_book(self, book_id):
+        """Load an EPUB section list and update the book-specific Generate controls."""
         idx = self.gen_book.findData(book_id)
         if idx >= 0:
             self.gen_book.setCurrentIndex(idx)
         self.book_combo_changed()
 
     def book_combo_changed(self, *_):
+        """React to selecting a different book in the Generate dropdown."""
         book_id = self.gen_book.currentData()
         if book_id is None:
             return
@@ -1005,6 +1064,7 @@ class Studio(QMainWindow):
         self.restore_voice_for_book(book_id)
 
     def set_checks(self, predicate):
+        """Apply a predicate to the chapter checkboxes in spine order."""
         self.section_table.blockSignals(True)
         for r, sec in enumerate(self.sections):
             self.section_table.item(r, 0).setCheckState(Qt.Checked if predicate(sec.index) else Qt.Unchecked)
@@ -1012,9 +1072,11 @@ class Studio(QMainWindow):
         self.update_selected_count()
 
     def select_story(self):
+        """Select sections that appear to contain numbered story chapters."""
         self.set_checks(lambda idx: bool(STORY_RE.match(self.sections[idx-1].title)))
 
     def select_next_unqueued(self):
+        """Find the next contiguous batch not claimed by existing jobs."""
         if self.current_book_id is None:
             return
         claimed = self.store.claimed_sections(self.current_book_id)
@@ -1026,11 +1088,13 @@ class Studio(QMainWindow):
             QMessageBox.information(self, 'Nothing left', 'All matching sections are already queued or completed.')
 
     def selected_indices(self):
+        """Return checked EPUB section indices in reading order."""
         return [self.section_table.item(r, 0).data(Qt.UserRole)
                 for r in range(self.section_table.rowCount())
                 if self.section_table.item(r, 0).checkState() == Qt.Checked]
 
     def update_selected_count(self, *_):
+        """Show section count, word count, and rough finished-audio estimate."""
         if not self.sections:
             self.gen_selected.setText('0 selected')
             return
@@ -1040,6 +1104,7 @@ class Studio(QMainWindow):
         self.gen_selected.setText(f'{len(nums)} selected sections · {words:,} words · ~{hours:.1f} h finished audio (estimate, not GPU time)')
 
     def queue_selection(self):
+        """Create one or more immutable narrator-specific jobs from checked sections."""
         if self.current_book_id is None:
             return
         selected = self.selected_indices()
@@ -1124,11 +1189,13 @@ class Studio(QMainWindow):
         self.filter_queue()
 
     def selected_job_id(self):
+        """Look up the stable database identifier stored in the selected queue row."""
         r = self.job_table.currentRow()
         first = self.job_table.item(r, 0) if r >= 0 else None
         return first.data(Qt.UserRole) if first else None
 
     def start_queue(self):
+        """Start the next pending job unless paused or already generating."""
         if self.proc is not None:
             self.run_queue = True
             return
@@ -1141,6 +1208,7 @@ class Studio(QMainWindow):
             self.statusBar().showMessage('Queue empty — no pending jobs.')
 
     def run_selected_job(self):
+        """Start only the selected queue entry instead of auto-running all jobs."""
         job_id = self.selected_job_id()
         if job_id is None:
             QMessageBox.information(self, 'Select a part', 'Choose a queued part first.')
@@ -1158,6 +1226,7 @@ class Studio(QMainWindow):
         self.start_job(job_id)
 
     def pause_after_part(self):
+        """Stop automatic queue advancement after the active M4B finishes."""
         self.run_queue = False
         if self.proc is not None:
             self.statusBar().showMessage('Will finish this M4B part, then pause before the next one.')
@@ -1166,6 +1235,7 @@ class Studio(QMainWindow):
             self.statusBar().showMessage('Queue paused. No part is currently running.')
 
     def start_job(self, job_id):
+        """Create a separate converter process with fixed sections, narrator, and output name."""
         if self.proc is not None:
             return
         editor = getattr(self, 'editor_dialog', None)
@@ -1228,6 +1298,7 @@ class Studio(QMainWindow):
         self.chapter_text.setText('Preparing chapter plan…')
         self.overall_text.setText('Overall: preparing…')
         self.stat_eta.setText('ETA: calculating')
+        # Mark the job running before launching, so an unclean GUI exit is recoverable.
         self.store.update_job(job_id, 'running')
         self.refresh_jobs()
         self.write_log(f"\n──── Starting job #{job_id}: {job['name']} · {voice_name(job['voice_path'])} ────")
@@ -1235,6 +1306,7 @@ class Studio(QMainWindow):
         self.statusBar().showMessage('Chatterbox conversion running…')
 
     def consume_output(self):
+        """Read incremental converter stdout and split control events from readable logs."""
         if self.proc is None:
             return
         incoming = bytes(self.proc.readAllStandardOutput()).decode('utf-8', errors='replace')
@@ -1242,6 +1314,7 @@ class Studio(QMainWindow):
         *lines, self.buffer = self.buffer.split('\n')
         for raw in lines:
             line = raw.strip()
+            # Control events are JSON and must not be confused with human-readable logs.
             if line.startswith(EVENT_PREFIX):
                 try:
                     self.progress_event(json.loads(line[len(EVENT_PREFIX):]))
@@ -1259,6 +1332,7 @@ class Studio(QMainWindow):
             self.write_log(line)
 
     def progress_event(self, event):
+        """Interpret JSON progress events and update chapter, total, and export state."""
         kind = event['event']
         if kind == 'plan':
             self.plan = {int(s['index']): s for s in event['sections']}
@@ -1273,6 +1347,7 @@ class Studio(QMainWindow):
             self.current_section = idx
             self.current_chunk = int(event['chunk'])
             self.current_total = int(event['total'])
+            # Monotonic accounting prevents duplicate/replayed cache events reversing progress.
             self.done_chunks[idx] = max(self.done_chunks.get(idx, 0), self.current_chunk)
             if event.get('seconds') and float(event['seconds']) > 1.0:
                 self.chunk_durations.append(float(event['seconds']))
@@ -1301,10 +1376,12 @@ class Studio(QMainWindow):
             self.persist_progress()
 
     def persist_progress(self, force=False):
+        """Rate-limit durable chunk-count writes to avoid excessive SQLite traffic."""
         if self.active_job_id is None or not self.plan:
             return
         done = sum(self.done_chunks.values())
         current_time = time.monotonic()
+        # SQLite writes and downstream MySQL updates are intentionally throttled.
         if not force and done-self.last_progress_chunks < 20 and current_time-self.last_progress_save < 15:
             return
         self.store.update_progress(self.active_job_id, self.total_chunks, done,
@@ -1313,12 +1390,14 @@ class Studio(QMainWindow):
         self.last_progress_chunks = done
 
     def paint_progress(self):
+        """Update progress bars and ETA from the current chunk plan and timing samples."""
         if not self.plan:
             return
         done = sum(self.done_chunks.values())
         total = max(1, self.total_chunks)
         ratio = done / total
         # 98% covers TTS, remaining 2% is final M4B mux/encode.
+        # Reserve the last 2% for encoding instead of showing 100% before export exists.
         display = 98.0 * ratio
         self.overall_progress.setValue(round(display * 10))
         self.overall_text.setText(f'Overall: {display:.1f}% · {done:,} / {total:,} chunks')
@@ -1335,10 +1414,12 @@ class Studio(QMainWindow):
             self.stat_eta.setText(f'ETA: ~{fmt_seconds(eta)} + export')
 
     def tick(self):
+        """Refresh elapsed-time text when a conversion is active."""
         if self.proc is not None and self.started_at is not None:
             self.stat_elapsed.setText(f'Elapsed: {fmt_seconds(time.monotonic() - self.started_at)}')
 
     def stop_job(self):
+        """Request an orderly stop that retains previously completed chunk audio."""
         self.run_queue = False
         if self.proc is None:
             self.statusBar().showMessage('Queue paused. Start queue when you are ready.')
@@ -1354,6 +1435,7 @@ class Studio(QMainWindow):
         QTimer.singleShot(15000, self.offer_force_stop)
 
     def offer_force_stop(self):
+        """Offer process termination if a requested graceful stop is taking too long."""
         if self.proc is None or self.proc.state() == QProcess.NotRunning:
             return
         ask = QMessageBox.question(self, 'Conversion still stopping',
@@ -1364,10 +1446,12 @@ class Studio(QMainWindow):
             self.proc.kill()
 
     def process_error(self, _error):
+        """Record a Qt subprocess error message for diagnosis."""
         if self.proc is not None:
             self.write_log(f'Process error: {self.proc.errorString()}')
 
     def process_finished(self, exit_code, exit_status):
+        """Verify an export and transition the job to complete, interrupted, or failed."""
         if self.proc is None:
             return
         self.consume_output()
@@ -1380,6 +1464,7 @@ class Studio(QMainWindow):
         job = self.store.job(job_id)
         if good:
             expected = Path(self.last_output_path) if self.last_output_path else None
+            # A zero exit code alone is insufficient: the named output must exist.
             if not expected or not expected.is_file() or expected.stat().st_size < 1024 or expected.stem != job['output_name']:
                 good = False
                 self.write_log('Export verification failed: M4B missing, too small, or incorrect filename.')
@@ -1407,11 +1492,13 @@ class Studio(QMainWindow):
         self.refresh_jobs()
         self.refresh_review()
         if self.run_queue and good:
+            # Schedule the next job after this signal handler unwinds.
             QTimer.singleShot(350, self.start_queue)
         else:
             self.run_queue = False
 
     def retry_selected(self):
+        """Put a failed or interrupted job back into the runnable queue."""
         job_id = self.selected_job_id()
         if job_id is None:
             return
@@ -1429,6 +1516,7 @@ class Studio(QMainWindow):
         self.statusBar().showMessage(f'Job #{job_id} requeued. Click Start queue to run.')
 
     def remove_selected_job(self):
+        """Remove the chosen queue record without deleting audiobook output."""
         job_id = self.selected_job_id()
         if job_id is None or job_id == self.active_job_id:
             return
@@ -1437,10 +1525,12 @@ class Studio(QMainWindow):
         self.statusBar().showMessage('Job removed from the queue. Audio files were not deleted.')
 
     def selected_job_output(self):
+        """Locate the M4B path associated with the selected job."""
         job_id = self.selected_job_id()
         return self.store.job(job_id) if job_id is not None else None
 
     def open_selected_output(self, *_):
+        """Open the selected job export with the default desktop player."""
         job = self.selected_job_output()
         if job is None:
             return
@@ -1451,12 +1541,14 @@ class Studio(QMainWindow):
                 'The selected job does not have an exported M4B yet. Use Open folder to find its work files.')
 
     def job_output_folder(self, job):
+        """Determine a safe folder to open for a job and its voice-specific output."""
         if job['output_path'] and Path(job['output_path']).parent.is_dir():
             return Path(job['output_path']).parent
         self.converter = self.converter or load_converter()
         return self.converter.book_folder(Path(job['book_path']))
 
     def open_selected_output_folder(self):
+        """Show the selected job output directory in the file manager."""
         job = self.selected_job_output()
         if job is None:
             return
@@ -1468,6 +1560,7 @@ class Studio(QMainWindow):
                 'This audiobook has not created an output directory yet.')
 
     def copy_selected_output_path(self):
+        """Copy the export filename for external use."""
         job = self.selected_job_output()
         if job is not None:
             path = job['output_path'] or str(self.job_output_folder(job))
@@ -1475,9 +1568,11 @@ class Studio(QMainWindow):
             self.statusBar().showMessage('Output path copied to clipboard.')
 
     def review_selected_book_id(self):
+        """Resolve the book selected for the Review Audio page."""
         return self.review_book.currentData()
 
     def refresh_review(self, *_):
+        """Populate generated M4Bs and chapter WAVs available for review."""
         if not hasattr(self, 'review_book'):
             return
         book_id = self.review_selected_book_id()
@@ -1523,11 +1618,13 @@ class Studio(QMainWindow):
                 self.export_table.setItem(r, c, item(value, str(path) if c == 0 else None))
 
     def selected_export_path(self):
+        """Return the export path selected in the review table."""
         row = self.export_table.currentRow()
         obj = self.export_table.item(row, 0) if row >= 0 else None
         return Path(obj.data(Qt.UserRole)) if obj is not None else None
 
     def play_selected_export(self, *_):
+        """Play the selected completed audiobook part."""
         path = self.selected_export_path()
         if path is not None and path.is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
@@ -1535,6 +1632,7 @@ class Studio(QMainWindow):
             QMessageBox.information(self, 'M4B not available', 'Select an exported M4B that exists on disk.')
 
     def open_selected_export_folder(self):
+        """Open the containing folder for the selected M4B."""
         path = self.selected_export_path()
         if path is not None and path.parent.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
@@ -1542,6 +1640,7 @@ class Studio(QMainWindow):
             QMessageBox.information(self, 'Output folder unavailable', 'Select a completed export.')
 
     def play_selected_chapter(self):
+        """Play a chapter WAV in the default desktop application."""
         row = self.review_table.currentRow()
         obj = self.review_table.item(row, 0) if row >= 0 else None
         if obj is None:
@@ -1553,6 +1652,7 @@ class Studio(QMainWindow):
             QMessageBox.information(self, 'Audio not available', 'The chapter WAV is not on disk.')
 
     def open_current_folder(self):
+        """Open the current review book’s output folder."""
         book_id = self.review_selected_book_id()
         if book_id is None:
             return
@@ -1566,6 +1666,7 @@ class Studio(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def open_chunk_editor(self):
+        """Open chunk-level take review for the selected completed chapter."""
         existing = getattr(self, 'editor_dialog', None)
         if existing is not None and existing.isVisible():
             existing.raise_()
@@ -1606,6 +1707,7 @@ class Studio(QMainWindow):
         self.editor_dialog.show()
 
     def preview_cache_cleanup(self):
+        """Estimate files and bytes eligible for optional raw cache cleanup."""
         days = self.cleanup_age.currentData()
         try:
             count, size = cache_summary(days)
@@ -1618,6 +1720,7 @@ class Studio(QMainWindow):
             self.error('Cache preview error', exc)
 
     def clean_cache(self):
+        """Confirm and delete only eligible raw cache files—not edited takes or exports."""
         if self.proc is not None or (getattr(self, 'editor_dialog', None) is not None
                                      and self.editor_dialog.isVisible()):
             QMessageBox.information(self, 'Generation in progress',
@@ -1646,9 +1749,11 @@ class Studio(QMainWindow):
             self.error('Cache cleanup error', exc)
 
     def refresh_settings(self):
+        """Update settings summaries to reflect current on-disk state."""
         self.update_mysql_status()
 
     def calculate_cache_size(self):
+        """Measure the raw narration cache size without deleting files."""
         try:
             folder = ROOT / 'output' / 'narration_cache_v2'
             size = size_on_disk(folder)
@@ -1657,11 +1762,13 @@ class Studio(QMainWindow):
             self.error('Unable to calculate cache size', exc)
 
     def open_cache_folder(self):
+        """Show the raw WAV cache folder in the file manager."""
         folder = ROOT / 'output' / 'narration_cache_v2'
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def closeEvent(self, event):
+        """Remember window state and ask for a safe shutdown if generation is active."""
         editor = getattr(self, 'editor_dialog', None)
         if editor is not None and editor.isVisible() and editor.proc is not None:
             QMessageBox.information(self, 'Audio editor busy',
@@ -1697,6 +1804,7 @@ QProgressBar { text-align: center; min-height: 17px; border-radius: 4px; }
 
 
 def main():
+    """Construct the Qt application and run its event loop."""
     app = QApplication(sys.argv)
     app.setApplicationName('AudiobookAI Studio')
     # `palette(mid)` is nearly invisible on some KDE dark themes. Mix the

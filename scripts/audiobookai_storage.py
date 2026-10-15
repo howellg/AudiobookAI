@@ -7,6 +7,8 @@ Generation can continue safely if MySQL is temporarily unavailable, and the
 next successful sync restores the database from the local journal of record.
 The mirror is intentionally one-way: edit books/jobs through the application.
 """
+
+# MAINTAINER NOTE: Canonical SQLite books/jobs store with optional one-way MySQL catalogue mirroring. SQLite remains usable without MySQL.
 from __future__ import annotations
 
 import hashlib
@@ -21,16 +23,19 @@ KEYRING_SERVICE = 'AudiobookAI Studio MySQL'
 
 
 def now():
+    """Return a human-readable local timestamp for catalogue metadata."""
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def default_config():
+    """Provide nonsecret connection defaults; MySQL starts disabled."""
     return {'mysql': {'enabled': False, 'host': '127.0.0.1', 'port': 3306,
                       'database': 'audiobookai', 'user': 'audiobookai',
                       'use_keyring': False}}
 
 
 def read_config(path=CONFIG_PATH):
+    """Merge whitelisted stored settings into safe defaults."""
     cfg = default_config()
     if path.is_file():
         try:
@@ -44,6 +49,7 @@ def read_config(path=CONFIG_PATH):
 
 
 def write_config(cfg, path=CONFIG_PATH):
+    """Persist whitelisted settings atomically without storing passwords."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # Explicitly whitelist public fields; never save a password to a JSON file.
     safe = default_config()
@@ -57,10 +63,12 @@ def write_config(cfg, path=CONFIG_PATH):
 
 
 def credential_name(cfg):
+    """Build a keyring identifier scoped to the configured MySQL endpoint."""
     return f"{cfg['user']}@{cfg['host']}:{cfg['port']}/{cfg['database']}"
 
 
 def lookup_password(cfg):
+    """Prefer an environment variable, then optionally query the OS keyring."""
     env = os.environ.get('AUDIOBOOKAI_MYSQL_PASSWORD')
     if env is not None:
         return env
@@ -74,6 +82,7 @@ def lookup_password(cfg):
 
 
 def save_password(cfg, password):
+    """Store the MySQL credential in the OS keyring when explicitly requested."""
     import keyring
     keyring.set_password(KEYRING_SERVICE, credential_name(cfg), password)
 
@@ -82,10 +91,12 @@ class Store:
     """SQLite canonical store, backwards-compatible with V2's jobs/books."""
 
     def __init__(self, path):
+        """Open SQLite, create missing tables and columns, and mark abandoned jobs interrupted."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        # Keep related books, sections, and jobs consistent across all upgrades.
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA busy_timeout=5000')
         self.on_change = None
@@ -110,6 +121,7 @@ class Store:
             PRIMARY KEY(book_id, section_index)
         );
         ''')
+        # Existing installations migrate in place; never drop their queued jobs.
         cols = {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)').fetchall()}
         new_columns = {
             'total_chunks': 'INTEGER NOT NULL DEFAULT 0',
@@ -123,21 +135,26 @@ class Store:
         for field, column_sql in new_columns.items():
             if field not in cols:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {field} {column_sql}')
+        # A process cannot still be generating after a fresh launch.
         self.db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (now(),))
         self.db.commit()
 
     def changed(self):
+        """Commit the transaction and notify the GUI that its optional mirror is dirty."""
         self.db.commit()
         if self.on_change is not None:
             self.on_change()
 
     def books(self):
+        """List imported books newest first."""
         return self.db.execute('SELECT * FROM books ORDER BY id DESC').fetchall()
 
     def book(self, book_id):
+        """Retrieve one book by persistent SQLite ID."""
         return self.db.execute('SELECT * FROM books WHERE id=?', (book_id,)).fetchone()
 
     def import_book(self, path, title, author, sections):
+        """Upsert an EPUB and replace its stored section metadata."""
         p = str(Path(path).resolve())
         words = sum(len(s.text.split()) for s in sections)
         existing = self.db.execute('SELECT id FROM books WHERE path=?', (p,)).fetchone()
@@ -169,12 +186,14 @@ class Store:
         self.changed()
 
     def delete_book(self, book_id):
+        """Remove an unused book while refusing to orphan queue records."""
         if self.db.execute('SELECT COUNT(*) FROM jobs WHERE book_id=?', (book_id,)).fetchone()[0]:
             raise ValueError('This book has queued or completed jobs. Remove its jobs first.')
         self.db.execute('DELETE FROM books WHERE id=?', (book_id,))
         self.changed()
 
     def add_job(self, book_id, name, indices, output_name, voice_path=None):
+        """Create a queued batch with selected indices and a fixed narrator path."""
         new_id = self.db.execute('''INSERT INTO jobs(book_id,name,indices,output_name,status,added,updated,voice_path)
                                     VALUES(?,?,?,?,?,?,?,?)''',
                                  (book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
@@ -183,6 +202,7 @@ class Store:
         return new_id
 
     def set_job_voice(self, job_id, voice_path):
+        """Change a narrator only before execution; reset stale progress counters."""
         job = self.job(job_id)
         if job is None or job['status'] != 'queued':
             raise ValueError('Narrator can be changed only before a queued job starts.')
@@ -192,18 +212,22 @@ class Store:
         self.changed()
 
     def jobs(self):
+        """Return queue rows joined to their book titles and source paths."""
         return self.db.execute('''SELECT jobs.*, books.title AS book_title, books.path AS book_path
                                   FROM jobs JOIN books ON jobs.book_id=books.id
                                   ORDER BY jobs.id DESC''').fetchall()
 
     def job(self, job_id):
+        """Look up one queue row together with its book details."""
         return self.db.execute('''SELECT jobs.*, books.title AS book_title, books.path AS book_path
                                   FROM jobs JOIN books ON jobs.book_id=books.id WHERE jobs.id=?''', (job_id,)).fetchone()
 
     def next_job(self):
+        """Return the oldest queued job for FIFO processing."""
         return self.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
 
     def update_job(self, job_id, status, output_path=None, error=''):
+        """Persist status, finished time, last error, and export location."""
         self.db.execute('''UPDATE jobs SET status=?, output_path=COALESCE(?,output_path),
                            error=?, finished=?, updated=? WHERE id=?''',
                         (status, output_path, error, now() if status == 'complete' else None, now(), job_id))
@@ -211,22 +235,26 @@ class Store:
 
     def update_progress(self, job_id, total_chunks, completed_chunks,
                         current_section=None, current_chunk=0, current_total=0):
+        """Store a checkpoint of chapter and overall chunk progress."""
         self.db.execute('''UPDATE jobs SET total_chunks=?,completed_chunks=?, current_section=?,
                            current_chunk=?,current_total=?,updated=? WHERE id=?''',
                         (total_chunks, completed_chunks, current_section, current_chunk, current_total, now(), job_id))
         self.changed()
 
     def remove_job(self, job_id):
+        """Delete one job record without touching generated audio files."""
         self.db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
         self.changed()
 
     def claimed_sections(self, book_id):
+        """Find sections already covered by queued, running, or complete jobs."""
         rows = self.db.execute("SELECT indices FROM jobs WHERE book_id=? AND status IN ('queued','running','complete')",
                                (book_id,)).fetchall()
         return {int(i) for row in rows for i in json.loads(row['indices'])}
 
     def snapshot(self):
         """Consistent, small metadata snapshot; no EPUB or audio data copied."""
+        # All three tables must describe the same point in time for mirror sync.
         self.db.execute('BEGIN')
         try:
             tables = ('books', 'book_sections', 'jobs')
@@ -239,6 +267,7 @@ class Store:
             raise
 
     def close(self):
+        """Release the SQLite connection."""
         self.db.close()
 
 
@@ -250,6 +279,7 @@ class MySQLMirror:
     """
 
     def __init__(self, cfg, password):
+        """Open SQLite, create missing tables and columns, and mark abandoned jobs interrupted."""
         self.cfg = dict(cfg)
         self.password = password
         self.connection = None
@@ -258,11 +288,13 @@ class MySQLMirror:
         self.dirty = True
 
     def connect(self):
+        """Open a MySQL connection and create missing tables for the mirror."""
         try:
             import mysql.connector
         except ImportError as exc:
             raise RuntimeError('MySQL driver missing. Install: uv pip install mysql-connector-python') from exc
         self.disconnect()
+        # Explicit pure-Python mode reduces dependence on the connector C extension.
         self.connection = mysql.connector.connect(
             host=self.cfg['host'], port=int(self.cfg['port']),
             user=self.cfg['user'], password=self.password,
@@ -322,12 +354,14 @@ class MySQLMirror:
         return True
 
     def connected(self):
+        """Report whether the active MySQL connection can be used."""
         try:
             return bool(self.connection and self.connection.is_connected())
         except Exception:
             return False
 
     def sync(self, store):
+        """Replace mirror metadata with a consistent SQLite snapshot in a transaction."""
         if not self.connected():
             self.connect()
         snapshot = store.snapshot()
@@ -385,6 +419,7 @@ class MySQLMirror:
             cur.close()
 
     def disconnect(self):
+        """Close the MySQL connection and clear mirror state."""
         if self.connection is not None:
             try:
                 self.connection.close()

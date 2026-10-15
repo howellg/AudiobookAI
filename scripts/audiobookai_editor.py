@@ -3,6 +3,8 @@
 Audio chunks are played in the user's default player. New takes are generated
 through a subprocess, preventing CUDA/Qt contention in the GUI process.
 """
+
+# MAINTAINER NOTE: Qt chunk editor that plays existing audio and launches isolated converter subprocesses for take generation and export rebuilding.
 from __future__ import annotations
 
 import json
@@ -22,7 +24,9 @@ ROOT = SCRIPT.parent.parent
 
 
 class ChunkEditor(QDialog):
+    """Modal chunk review tool supporting alternative takes and offline rebuilds."""
     def __init__(self, book_path, folder, chapter, voice_path=None, completed_jobs=(), parent=None):
+        """Populate chapter chunks, playback controls, take history, and converter actions."""
         super().__init__(parent)
         self.book_path = Path(book_path)
         self.folder = Path(folder)
@@ -88,14 +92,17 @@ class ChunkEditor(QDialog):
             self.reload()
 
     def button(self, text, func):
+        """Build a push button connected to an editor command."""
         button = QPushButton(text)
         button.clicked.connect(func)
         return button
 
     def voice_args(self):
+        """Encode the chapter’s fixed narrator selection for child converter calls."""
         return ['--voice', self.voice_path] if self.voice_path else []
 
     def command(self, action, **kwargs):
+        """Build an argv list for a converter action without shell interpolation."""
         args = ['-u', str(SCRIPT), action, str(self.book_path),
                 '--chapters', str(self.chapter), *self.voice_args()]
         for key, value in kwargs.items():
@@ -103,9 +110,11 @@ class ChunkEditor(QDialog):
         return args
 
     def log(self, message):
+        """Append a review operation message to the editor log."""
         self.logs.appendPlainText(str(message))
 
     def run_commands(self, commands, done=None):
+        """Queue a sequence of converter actions, refusing concurrent edits."""
         if self.proc is not None:
             QMessageBox.information(self, 'Operation running', 'An audio operation is already in progress.')
             return
@@ -114,6 +123,7 @@ class ChunkEditor(QDialog):
         self.run_next()
 
     def run_next(self):
+        """Execute the next review action and refresh the view after the final step."""
         if not self.commands:
             callback = self.on_commands_finished
             self.on_commands_finished = None
@@ -135,6 +145,7 @@ class ChunkEditor(QDialog):
         self.proc.start()
 
     def drain(self):
+        """Drain output from the editor’s active converter child process."""
         if self.proc is not None:
             text = bytes(self.proc.readAllStandardOutput()).decode('utf-8', errors='replace')
             for line in text.replace('\r', '\n').splitlines():
@@ -142,6 +153,7 @@ class ChunkEditor(QDialog):
                     self.log(line)
 
     def process_finished(self, exit_code, exit_status):
+        """Stop on converter failure or continue queued editor commands."""
         self.drain()
         self.proc.deleteLater()
         self.proc = None
@@ -155,6 +167,7 @@ class ChunkEditor(QDialog):
         self.run_next()
 
     def reload(self):
+        """Reload the stored index and edits to refresh visible chunk information."""
         try:
             self.index = production.load_index(self.folder, self.chapter)
             chunks = self.index.get('chunks', [])
@@ -188,6 +201,7 @@ class ChunkEditor(QDialog):
             self.banner.setText(f'Unable to read chunk metadata: {exc}')
 
     def selected(self):
+        """Return the selected chunk’s index entry, if any."""
         row = self.table.currentRow()
         chunks = self.index.get('chunks', [])
         if row < 0 or row >= len(chunks):
@@ -195,6 +209,7 @@ class ChunkEditor(QDialog):
         return chunks[row]
 
     def select_chunk(self):
+        """Display the selected chunk text, active take, and quality flags."""
         ch = self.selected()
         if ch is None:
             return
@@ -223,17 +238,20 @@ class ChunkEditor(QDialog):
             self.report.setText('Raw WAV missing. The original chapter WAV may still be available; generate again to restore raw cache.')
 
     def play_file(self, path):
+        """Launch an existing WAV with the user’s default audio player."""
         if path and Path(path).is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
         else:
             QMessageBox.information(self, 'Missing WAV', 'This take is not on disk.')
 
     def play_original(self):
+        """Play the raw unedited WAV for the selected chunk."""
         ch = self.selected()
         if ch:
             self.play_file(production.original_chunk_file(ch))
 
     def chosen_take(self):
+        """Resolve the saved take chosen in the editor dropdown."""
         ch = self.selected()
         if not ch:
             return None
@@ -242,12 +260,14 @@ class ChunkEditor(QDialog):
         return next((take for take in takes if take['id'] == take_id), None)
 
     def play_take(self):
+        """Play the selected alternate take, if its WAV exists."""
         take = self.chosen_take()
         ch = self.selected()
         if ch:
             self.play_file(self.folder / take['wav'] if take else production.original_chunk_file(ch))
 
     def activate_take(self):
+        """Select a saved take as the active replacement for future rebuilds."""
         if self.proc is not None:
             return
         ch = self.selected()
@@ -261,6 +281,7 @@ class ChunkEditor(QDialog):
             QMessageBox.warning(self, 'Unable to activate take', str(exc))
 
     def revert(self):
+        """Restore the original cached recording as the active version."""
         if self.proc is not None:
             return
         ch = self.selected()
@@ -273,9 +294,11 @@ class ChunkEditor(QDialog):
                 QMessageBox.warning(self, 'Revert failed', str(exc))
 
     def index_chapter(self):
+        """Create or refresh the chunk index for the current chapter."""
         self.run_commands([self.command('index')])
 
     def generate_take(self):
+        """Ask the converter to create a non-destructive replacement recording."""
         ch = self.selected()
         if not ch:
             return
@@ -286,9 +309,11 @@ class ChunkEditor(QDialog):
         self.run_commands([self.command('render-chunk', chunk=ch['number'], replacement_text=replacement)])
 
     def audit(self):
+        """Run quality checks and display warnings for the selected recordings."""
         self.run_commands([self.command('audit')])
 
     def rebuild(self):
+        """Reassemble the chapter and affected exports using selected takes."""
         if self.proc is not None:
             return
         if not self.index.get('chunks'):
@@ -312,12 +337,14 @@ class ChunkEditor(QDialog):
         self.run_commands([self.command('rebuild'), *exports])
 
     def reject(self):
+        """Handle cancellation while protecting any running editor operation."""
         if self.proc is not None:
             QMessageBox.information(self, 'Editor busy', 'Finish or cancel the current audio operation before closing.')
             return
         super().reject()
 
     def closeEvent(self, event):
+        """Prevent closing the editor while its subprocess is still working."""
         if self.proc is not None:
             event.ignore()
             QMessageBox.information(self, 'Editor busy', 'An audio process is running. Keep the editor open until it finishes.')

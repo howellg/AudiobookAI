@@ -4,6 +4,8 @@ Never import mysql.connector or its C extension in the Qt GUI process.
 Uses a short-lived helper process and the existing MySQLMirror implementation.
 SQLite remains the canonical source of truth.
 """
+
+# MAINTAINER NOTE: GUI-side MySQL isolation layer. The native connector stays out of the Qt process, and metadata is sent to a worker over stdin.
 from __future__ import annotations
 
 import json
@@ -18,6 +20,7 @@ _WORKER = Path(__file__).with_name('audiobookai_mysql_worker.py')
 class MySQLMirror:
     """GUI-compatible adapter matching the previous storage.MySQLMirror API."""
     def __init__(self, cfg, password):
+        """Store mirror configuration without importing the native MySQL driver."""
         self.cfg = dict(cfg)
         self.password = password
         self.last_sync = None
@@ -28,7 +31,9 @@ class MySQLMirror:
     def sync(self, store):
         # The GUI's SQLite connection produces a coherent snapshot on its own
         # thread. All MySQL operations are performed by a separate interpreter.
+        """Send a consistent snapshot to the helper via stdin and translate errors."""
         snapshot = store.snapshot()
+        # Send credentials over a child-process pipe, never shell arguments or disk files.
         payload = {'cfg': self.cfg, 'password': self.password,
                    'snapshot': snapshot}
         try:
@@ -72,7 +77,9 @@ class MySQLMirror:
 
     def connected(self):
         # A successful completed sync, not a persistent network connection.
+        """Return the last known state of the helper-backed mirror."""
         return self._last_sync_succeeded
 
     def disconnect(self):
+        """Forget connection state without affecting the canonical SQLite data."""
         self._last_sync_succeeded = False

@@ -2,6 +2,8 @@
 
 No Chatterbox / torch dependency: safe to import in the UI and unit tests.
 """
+
+# MAINTAINER NOTE: Narrator WAV validation, safe import, and content-addressed snapshot storage for queued jobs.
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +21,7 @@ SNAPSHOT_DIR = VOICE_DIR / '.audiobookai_voice_snapshots'
 
 
 def sha256_file(path: Path) -> str:
+    """Stream a file through SHA-256 to identify its exact contents."""
     h = hashlib.sha256()
     with Path(path).open('rb') as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b''):
@@ -70,6 +73,7 @@ def import_voice(source: Path) -> Path:
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     if source.parent == VOICE_DIR or VOICE_DIR in source.parents:
         return source
+    # A queue stores a fingerprinted copy, not a mutable filename alone.
     digest = sha256_file(source)[:12]
     safe_stem = re.sub(r'[^\w-]+', '_', source.stem, flags=re.UNICODE).strip('_')[:55] or 'narrator'
     dest = VOICE_DIR / f'{safe_stem}_{digest}.wav'
@@ -95,6 +99,7 @@ def freeze_voice(source: Path | None) -> Path | None:
     if not source:
         return None
     source = validate_voice(source)
+    # None deliberately means legacy default voice and its existing cache identity.
     if source == DEFAULT_VOICE.resolve():
         return None
     digest = sha256_file(source)
@@ -116,6 +121,7 @@ def freeze_voice(source: Path | None) -> Path | None:
 
 
 def voice_name(path: str | Path | None) -> str:
+    """Show a friendly narrator label, removing internal hash suffixes."""
     if not path:
         return 'British narrator (default)'
     p = Path(path)

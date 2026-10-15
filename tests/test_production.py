@@ -17,20 +17,26 @@ import audiobookai_production as p
 
 @dataclass
 class Chunk:
+    """One speakable text unit plus the boundary context needed for audio assembly."""
     text: str
     boundary: str = 'sentence'
     dialogue: bool = False
 
 
 class FakeEngine:
+    """Tiny engine stub exposing the raw cache directory and deterministic cache keys."""
     def __init__(self, cache):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.CACHE_DIR = cache
     def cache_key(self, text):
+        """Build the cache identity for this text and the current narration configuration."""
         return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
 class ProductionTests(unittest.TestCase):
+    """Verify chunk editing, quality checks, and safe cleanup behavior."""
     def setUp(self):
+        """Prepare isolated fixtures and temporary data for each test."""
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.out = self.root / 'audiobooks' / 'book'
@@ -41,9 +47,11 @@ class ProductionTests(unittest.TestCase):
         self.chunks = [Chunk('Hello, traveler.'), Chunk('How are you doing today?', 'end')]
 
     def tearDown(self):
+        """Release fixtures and temporary resources after each test."""
         self.temp.cleanup()
 
     def test_non_destructive_takes_and_revert(self):
+        """Verify non destructive takes and revert behavior."""
         p.save_index(self.out, 3, 'Third chapter', self.chunks, self.engine, 'sig')
         orig = self.cache / (self.engine.cache_key(self.chunks[0].text) + '.wav')
         orig.write_bytes(b'a' * 1024)
@@ -67,6 +75,7 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(path2.read_bytes(), b'c' * 1024)
 
     def test_outdated_source_and_unsafe_take_path_rejected(self):
+        """Verify outdated source and unsafe take path rejected behavior."""
         rel, path = p.take_destination(self.out, 5, 1)
         path.write_bytes(b'x'*1024)
         p.register_take(self.out, 5, 1, 'Old words', 'New words', rel)
@@ -77,6 +86,7 @@ class ProductionTests(unittest.TestCase):
             p.register_take(self.out, 5, 2, 'X', 'X', Path('../../../outside.wav'))
 
     def test_audio_validation_reports_hard_and_soft_problems(self):
+        """Verify audio validation reports hard and soft problems behavior."""
         sr = 24000
         silence = p.quality_report(np.zeros(sr, dtype=np.float32), sr, words=7)
         self.assertTrue(silence['unusable'])
@@ -89,6 +99,7 @@ class ProductionTests(unittest.TestCase):
         self.assertIn('possible clipping', clipped['flags'])
 
     def test_manual_cache_cleanup_does_not_follow_symlinks_or_touch_other_audio(self):
+        """Verify manual cache cleanup does not follow symlinks or touch other audio behavior."""
         older = self.cache / 'old.wav'
         newer = self.cache / 'new.wav'
         other = self.cache / 'manifest.json'
@@ -109,6 +120,7 @@ class ProductionTests(unittest.TestCase):
             p.remove_raw_cache(None, cache_dir=self.cache, expected_count=0)
 
     def test_cleanup_refuses_arbitrary_directory(self):
+        """Verify cleanup refuses arbitrary directory behavior."""
         with self.assertRaises(ValueError):
             p.remove_raw_cache(None, cache_dir=self.out)
 

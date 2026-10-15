@@ -16,15 +16,19 @@ from audiobookai_storage import Store, MySQLMirror
 
 
 class CheckingCursor:
+    """SQL spy that checks parameter binding counts before recording statements."""
     def __init__(self, calls):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.calls = calls
 
     def execute(self, sql, args=None):
+        """Record a SQL statement instead of sending it to a real server."""
         if args is not None:
             self.assert_bindings(sql, args)
         self.calls.append((sql, args))
 
     def executemany(self, sql, rows):
+        """Record all SQL argument tuples to verify batch inserts."""
         rows = list(rows)
         for row in rows:
             self.assert_bindings(sql, row)
@@ -32,36 +36,46 @@ class CheckingCursor:
 
     @staticmethod
     def assert_bindings(sql, row):
+        """Reject SQL executions whose placeholder count differs from the tuple length."""
         expected = sql.count('%s')
         actual = len(row)
         if expected != actual:
             raise AssertionError(f'MySQL query has {expected} placeholders for {actual} values: {sql[:90]}')
 
     def close(self):
+        """Simulate closing a database cursor or connection."""
         pass
 
 
 class FakeConnection:
+    """Fake transaction-capable connection for MySQL mirror tests."""
     def __init__(self):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.calls = []
         self.commits = 0
         self.rollbacks = 0
 
     def cursor(self):
+        """Return a recording cursor attached to the fake connection."""
         return CheckingCursor(self.calls)
 
     def is_connected(self):
+        """Report whether this fake MySQL connection is still open."""
         return True
 
     def commit(self):
+        """Count transaction commits without writing to a real database."""
         self.commits += 1
 
     def rollback(self):
+        """Count transaction rollbacks for failure-path assertions."""
         self.rollbacks += 1
 
 
 class MySQLSyncParameterTests(unittest.TestCase):
+    """Guard against the historical MySQL job INSERT placeholder mismatch."""
     def test_mysql_snapshot_with_a_narrator_job(self):
+        """Check that a narrator-bearing job inserts exactly 17 values for 17 SQL placeholders."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Store(Path(tmp) / 'studio.sqlite3')
             try:

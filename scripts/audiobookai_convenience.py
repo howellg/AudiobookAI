@@ -2,6 +2,8 @@
 
 Does not import Qt, the speech engine, a database driver, or perform I/O.
 """
+
+# MAINTAINER NOTE: Pure helper functions for selection ranges, queue status filters, and audiobook duration estimates. No Qt or TTS imports are needed.
 from __future__ import annotations
 
 import re

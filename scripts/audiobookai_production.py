@@ -3,6 +3,8 @@
 No Qt, Torch, or MySQL dependency. Never edits the source EPUB or shared raw
 cache when a user makes a new take. Editing is stored alongside chapter WAVs.
 """
+
+# MAINTAINER NOTE: Non-destructive production helpers: chunk indexes, take history, audio checks, and carefully restricted cache deletion.
 from __future__ import annotations
 
 import hashlib
@@ -20,25 +22,30 @@ RAW_CACHE = ROOT / 'output' / 'narration_cache_v2'
 
 
 def atomic_json(path, data):
+    """Save small review manifests with replace-on-success semantics."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        # Atomic rename prevents a half-written take or index manifest.
         tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
 
 
 def index_path(out, chapter):
+    """Locate the stable JSON index mapping a chapter to cached speech chunks."""
     return Path(out) / 'chunk_indexes' / f'{int(chapter):04d}.json'
 
 
 def edit_path(out, chapter):
+    """Locate the JSON manifest of alternate takes for one chapter."""
     return Path(out) / 'chunk_edits' / f'{int(chapter):04d}.json'
 
 
 def read_json(path, default=None):
+    """Read a JSON file or return a default when it is not yet present."""
     path = Path(path)
     if not path.exists():
         return {} if default is None else default
@@ -65,10 +72,12 @@ def save_index(out, chapter, title, chunks, engine, signature):
 
 
 def load_index(out, chapter):
+    """Load the original chunk index used by the editor."""
     return read_json(index_path(out, chapter), {})
 
 
 def load_edits(out, chapter):
+    """Load and validate the dictionary of saved replacement takes."""
     data = read_json(edit_path(out, chapter), {'version': 1, 'edits': {}})
     if not isinstance(data.get('edits'), dict):
         raise ValueError('Invalid chapter edit file')
@@ -76,7 +85,9 @@ def load_edits(out, chapter):
 
 
 def active_take(out, chapter, number, original_text):
+    """Return the currently selected replacement only when original text still matches."""
     entry = load_edits(out, chapter)['edits'].get(str(number), {})
+    # Edits are valid only for the same exact original text and chunk numbering.
     if entry.get('original_text') != original_text:
         return None  # EPUB/chunking changed. Do not apply mismatched edits.
     active = entry.get('active')
@@ -90,6 +101,7 @@ def active_take(out, chapter, number, original_text):
 
 
 def all_takes(out, chapter, number, original_text):
+    """Return all alternate recordings and the selected take identifier."""
     entry = load_edits(out, chapter)['edits'].get(str(number), {})
     if entry.get('original_text') != original_text:
         return [], None
@@ -106,6 +118,7 @@ def edit_digest(out, chapter, chunks):
 
 
 def take_destination(out, chapter, number):
+    """Allocate a unique, nonoverwriting filename for a replacement WAV."""
     relative = Path('chunk_edits') / 'audio' / f'{int(chapter):04d}' / f'{int(number):04d}_{uuid.uuid4().hex}.wav'
     absolute = Path(out) / relative
     absolute.parent.mkdir(parents=True, exist_ok=True)
@@ -113,8 +126,10 @@ def take_destination(out, chapter, number):
 
 
 def register_take(out, chapter, number, original_text, replacement_text, relative):
+    """Validate and append a generated take, preserving earlier versions."""
     out = Path(out).resolve()
     path = (out / relative).resolve()
+    # Reject manifest paths outside this audiobook even if an edit file is tampered with.
     if not path.is_relative_to(out) or not path.is_file() or path.stat().st_size < 512:
         raise ValueError('Replacement WAV is missing, too small, or outside the chapter directory')
     data = load_edits(out, chapter)
@@ -135,6 +150,7 @@ def register_take(out, chapter, number, original_text, replacement_text, relativ
 
 
 def choose_take(out, chapter, number, original_text, take_id=None):
+    """Select or revert a take without deleting recordings."""
     data = load_edits(out, chapter)
     entry = data['edits'].get(str(number), {})
     if entry.get('original_text') != original_text:
@@ -189,6 +205,7 @@ def quality_report(samples, sample_rate, words=0):
 
 
 def inspect_wav(path, words=0):
+    """Read a WAV and pass its samples to the audio quality checker."""
     import soundfile as sf
     samples, rate = sf.read(str(path), dtype='float32', always_2d=False)
     if samples.ndim == 2:
@@ -213,11 +230,13 @@ def cache_candidates(older_than_days=None, cache_dir=RAW_CACHE, now=None):
 
 
 def cache_summary(older_than_days=None, cache_dir=RAW_CACHE, now=None):
+    """Return the count and total bytes of eligible raw cache recordings."""
     files = cache_candidates(older_than_days, cache_dir, now)
     return len(files), sum(p.stat().st_size for p in files)
 
 
 def remove_raw_cache(older_than_days=None, cache_dir=RAW_CACHE, expected_count=None):
+    """Delete previewed eligible raw chunks only after validating the target directory."""
     cache = Path(cache_dir).resolve()
     if cache != RAW_CACHE.resolve():
         # Unit tests may specify an alternate isolated location, never permit
@@ -225,6 +244,7 @@ def remove_raw_cache(older_than_days=None, cache_dir=RAW_CACHE, expected_count=N
         if not cache.name.startswith('test_'):
             raise ValueError('Cache deletion is limited to AudiobookAI raw cache')
     files = cache_candidates(older_than_days, cache)
+    # Refuse deletion if the cache changed since the user previewed it.
     if expected_count is not None and len(files) != expected_count:
         raise RuntimeError('Cache contents changed; preview again before deletion.')
     removed, total = 0, 0

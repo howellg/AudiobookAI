@@ -16,8 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 
 class EngineRecoveryTests(unittest.TestCase):
+    """Exercise V7 retry behavior without loading real model weights."""
     @classmethod
     def setUpClass(cls):
+        """Install fake Chatterbox imports so recovery tests run without loading the real model."""
         cls.original = {key: sys.modules.get(key) for key in ('chatterbox', 'chatterbox.tts')}
         chatterbox = types.ModuleType('chatterbox')
         chatterbox.__path__ = []
@@ -32,6 +34,7 @@ class EngineRecoveryTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        """Restore the Python import table after the engine test class completes."""
         sys.modules.pop('v7_test_stub', None)
         for key, value in cls.original.items():
             if value is None:
@@ -40,12 +43,14 @@ class EngineRecoveryTests(unittest.TestCase):
                 sys.modules[key] = value
 
     def test_failed_short_phrase_is_retried_and_split_automatically(self):
+        """Prove an overlong chunk is split and a forced editor take leaves the shared cache untouched."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             with patch.object(self.engine, 'CACHE_DIR', path):
                 with patch.object(self.engine, 'cache_key', side_effect=lambda t: hashlib.sha256(t.encode()).hexdigest()[:24]):
                     calls = []
                     def pretend(_model, text):
+                        """Simulate a model that rejects multiword chunks to exercise recursive fallback."""
                         calls.append(text)
                         if len(text.split()) > 1:
                             raise self.engine.OverlongGeneration('simulated limit')

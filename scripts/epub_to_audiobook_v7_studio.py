@@ -12,6 +12,8 @@ Usage:
 Reads ordinary, accessible (DRM-free) EPUB files. EPUB structure varies; inspect
 first to spot a misidentified table of contents, footnotes, or front matter.
 """
+
+# MAINTAINER NOTE: Current Studio conversion backend. EPUB parsing and metadata handling run independently of the GUI; GPU generation is loaded only when required.
 from __future__ import annotations
 
 import argparse
@@ -38,16 +40,20 @@ ACTIVE_VOICE = None  # CLI --voice; None leaves original V7 paths unchanged.
 
 
 def emit_event(kind, **values):
+    """Print a machine-readable JSON status record when launched by Studio."""
+    # Prefix distinguishes machine-readable updates from arbitrary stdout warnings.
     if STUDIO_EVENTS:
         print("AUDIOBOOKAI_EVENT " + json.dumps({"event": kind, **values}, ensure_ascii=False), flush=True)
 
 
 def request_stop(_signum, _frame):
+    """Set the graceful-stop flag from the process signal handler."""
     global STOP_REQUESTED
     STOP_REQUESTED = True
 
 
 def check_stop():
+    """Exit with a distinct status after finishing the current safe stop point."""
     if STOP_REQUESTED:
         print("Stopping cleanly; previously cached speech is preserved.", flush=True)
         raise SystemExit(130)
@@ -56,6 +62,7 @@ def check_stop():
 
 @dataclass
 class Section:
+    """One ordered EPUB segment with source metadata and its extracted paragraphs."""
     index: int
     title: str
     paragraphs: list[str]
@@ -63,10 +70,12 @@ class Section:
 
     @property
     def text(self):
+        """Join source paragraphs with blank lines to preserve paragraph boundaries."""
         return "\n\n".join(self.paragraphs)
 
 
 def safe_name(s: str, length=80):
+    """Convert a title or filename into a filesystem-safe basename."""
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", s).strip("_")[:length] or "untitled"
 
 
@@ -81,6 +90,7 @@ ROMAN_ONLY_HEADING = re.compile(r"^\s*([IVXLCDM]+)\s*[.:]?\s*$", re.IGNORECASE)
 
 
 def is_chapter_heading(text: str, tag_name: str = "") -> bool:
+    """Recognize numbered headings while rejecting ordinary narrative references."""
     text = re.sub(r"\s+", " ", text).strip()
     if CHAPTER_HEADING.fullmatch(text):
         return True
@@ -89,6 +99,7 @@ def is_chapter_heading(text: str, tag_name: str = "") -> bool:
 
 
 def load_epub(epub_path: Path):
+    """Read readable EPUB spine items in order and extract section metadata and prose."""
     try:
         from ebooklib import epub, ITEM_DOCUMENT
         from bs4 import BeautifulSoup
@@ -97,6 +108,7 @@ def load_epub(epub_path: Path):
 
     book = epub.read_epub(str(epub_path))
     def meta(name, fallback):
+        """Read a Dublin Core metadata value or use the provided fallback."""
         vals = book.get_metadata("DC", name)
         return (str(vals[0][0]).strip() if vals else fallback) or fallback
 
@@ -107,9 +119,11 @@ def load_epub(epub_path: Path):
     block_tags = heading_tags | {"p", "blockquote"}
 
     def add_section(name, paragraphs, source):
+        """Append a nonempty EPUB section and assign the next reading-order index."""
         if paragraphs:
             sections.append(Section(len(sections) + 1, name, paragraphs, source))
 
+    # Spine order is the book reading order; file names are not reliable chapter order.
     for item_id, linear in book.spine:
         if linear == "no":
             continue
@@ -154,6 +168,7 @@ def load_epub(epub_path: Path):
         current = []
         current_title = None
         found_chapter = False
+        # One XHTML file may contain several chapters; split on real heading elements.
         for tag_name, txt in blocks:
             if tag_name in heading_tags and is_chapter_heading(txt, tag_name):
                 if current:
@@ -180,12 +195,14 @@ def load_epub(epub_path: Path):
 
 
 def load_engine():
+    """Load the narration module lazily so inspection does not load the GPU model."""
     if not ENGINE_FILE.exists():
         raise SystemExit(f"Missing V7 engine: {ENGINE_FILE}\nPlace test_five_minutes_v7_smooth.py alongside this script.")
     spec = importlib.util.spec_from_file_location("audiobook_v6_engine", ENGINE_FILE)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    # Override only this converter process; the default file remains unchanged.
     if ACTIVE_VOICE is not None:
         module.VOICE_FILE = ACTIVE_VOICE
     if not module.VOICE_FILE.is_file():
@@ -196,9 +213,12 @@ def load_engine():
 
 def book_folder(path: Path, voice_path: Path | None = None):
     # Preserve the existing default-narrator folder for backwards compatibility.
+    """Separate completed chapters by narrator identity while keeping legacy default paths."""
+    # Include the source location so same-titled books do not share chapter folders.
     fingerprint = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
     original = OUT_ROOT / f"{safe_name(path.stem, 60)}_{fingerprint}_smooth_v7"
     voice = voice_path if voice_path is not None else ACTIVE_VOICE
+    # Legacy British-narrator output must remain discoverable after upgrades.
     if voice is None or Path(voice).resolve() == (ROOT / 'voices' / 'british_narrator.wav').resolve():
         return original
     # Isolate assembled chapter WAVs by actual voice content. Do not reuse a
@@ -209,6 +229,7 @@ def book_folder(path: Path, voice_path: Path | None = None):
 
 
 def chapter_signature(engine, section):
+    """Hash the text, narrator, and assembly settings used to build a chapter."""
     chunks = engine.make_chunks(section.text)
     signature = {"chunks": [(c.text, c.boundary, c.dialogue) for c in chunks],
                  "voice": [engine.cache_key(c.text) for c in chunks],
@@ -221,12 +242,14 @@ def chapter_signature(engine, section):
 
 
 def atomic_json(path: Path, payload):
+    """Write JSON through a temporary file so interrupted writes leave the prior file intact."""
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
 
 
 def read_manifest(path: Path):
+    """Read the previous chapter manifest, tolerating an absent or invalid one."""
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -236,6 +259,7 @@ def read_manifest(path: Path):
 
 
 def chapters_selected(expr: str | None, max_section: int):
+    """Parse a comma-separated list of chapter indices and inclusive ranges."""
     if not expr:
         return list(range(1, max_section+1))
     selected = set()
@@ -255,15 +279,18 @@ def chapters_selected(expr: str | None, max_section: int):
 
 
 def chapter_path(out: Path, index: int):
+    """Build the zero-padded chapter WAV path for a given EPUB section."""
     return out / "chapters" / f"{index:04d}.wav"
 
 
 def generate_sections(epub_path: Path, title, author, sections, chosen, out: Path):
     # Imports the proven V6 engine only when generation is requested.
+    """Plan exact chunk counts, synthesize incomplete chapters, and checkpoint metadata."""
     engine = load_engine()
     import torchaudio as ta
     import torch
     out.joinpath("chapters").mkdir(parents=True, exist_ok=True)
+    # Manifest signatures determine whether a complete chapter WAV may be reused.
     manifest_path = out / "manifest.json"
     manifest = read_manifest(manifest_path)
     manifest.update({"book": title, "author": author, "source": str(epub_path.resolve()),
@@ -272,6 +299,7 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
 
     # Plan all selected chapters before CUDA model loading, so the GUI can show
     # *exact* chunk totals rather than guessing from section counts or word counts.
+    # Build the full chunk plan before loading the large speech model onto the GPU.
     plans = []
     plan_data = {}
     for index in chosen:
@@ -474,14 +502,17 @@ def audit_chapter(sections, index, out):
 
 
 def ffmeta_escape(s: str):
+    """Escape special characters for FFmpeg chapter metadata."""
     return s.replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;").replace("#", "\\#").replace("\n", " ")
 
 
 def ffconcat_quote(path: Path):
+    """Quote a file path for FFmpeg concat-list syntax."""
     return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
 
 
 def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, output_name=None):
+    """Export chapter recordings under an explicit noncolliding part filename."""
     manifest = read_manifest(out / "manifest.json")
     recorded = manifest.get("chapters", {})
     absent = [i for i in chosen if not chapter_path(out, i).is_file() or str(i) not in recorded]
@@ -537,6 +568,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
 
 
 def main():
+    """Handle inspect, convert, rebuild, audit, and export actions from the CLI."""
     global STUDIO_EVENTS, ACTIVE_VOICE
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)

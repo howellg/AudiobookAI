@@ -20,6 +20,7 @@ spec.loader.exec_module(backend)
 
 
 def create_sample(path, frequency=500, duration=2):
+    """Write a short synthetic WAV fixture suitable for narrator validation."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), 'wb') as f:
         f.setnchannels(1)
@@ -30,7 +31,9 @@ def create_sample(path, frequency=500, duration=2):
 
 
 class VoiceTests(unittest.TestCase):
+    """Regression cases for voice behavior."""
     def setUp(self):
+        """Prepare isolated fixtures and temporary data for each test."""
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.voice_folder = self.root / 'voices'
@@ -42,10 +45,12 @@ class VoiceTests(unittest.TestCase):
         self.cfg.start()
 
     def tearDown(self):
+        """Release fixtures and temporary resources after each test."""
         self.cfg.stop()
         self.tmp.cleanup()
 
     def test_import_and_snapshot_stable_after_edit(self):
+        """Ensure an imported WAV and queued narrator snapshot survive later source edits."""
         sample = self.root / 'outside' / 'New narrator.wav'
         create_sample(sample, 87)
         imported = voices.import_voice(sample)
@@ -62,6 +67,7 @@ class VoiceTests(unittest.TestCase):
         self.assertNotIn(snapshot, voices.voice_choices())
 
     def test_default_preserves_original_cache_and_paths(self):
+        """Protect existing cache and chapter paths for the default British narrator."""
         self.assertIsNone(voices.freeze_voice(self.default))
         epub = self.root / 'story.epub'
         original = backend.book_folder(epub)
@@ -76,6 +82,7 @@ class VoiceTests(unittest.TestCase):
         self.assertNotEqual(altfolder, backend.book_folder(epub, alternative))
 
     def test_queued_voice_persists_and_can_change_only_prestart(self):
+        """Enforce narrator immutability after a job starts."""
         db = Store(self.root / 'store.sqlite3')
         try:
             book = db.import_book(self.root/'example.epub', 'Test', 'Author', [])
@@ -97,6 +104,7 @@ class VoiceTests(unittest.TestCase):
             db.close()
 
     def test_invalid_voice_rejected(self):
+        """Reject recordings with invalid or unreadable WAV input."""
         fake = self.root/'fake.wav'
         fake.write_bytes(b'not a wav' * 200)
         with self.assertRaises(ValueError):

@@ -5,6 +5,8 @@ Requires: uv pip install PySide6
 Run: python scripts/audiobook_gui.py
 Put this script beside epub_to_audiobook.py in ~/AudiobookAI/scripts/.
 """
+
+# MAINTAINER NOTE: Legacy first-generation Qt window. The supported desktop UI is `audiobook_gui_v2.py`; this file remains for historical compatibility.
 from __future__ import annotations
 
 import importlib.util
@@ -27,6 +29,7 @@ CONVERTER = SCRIPT_DIR / 'epub_to_audiobook.py'
 
 
 def load_converter():
+    """Load the original converter lazily when an EPUB needs inspection."""
     if not CONVERTER.is_file():
         raise FileNotFoundError(f'Missing converter script: {CONVERTER}')
     spec = importlib.util.spec_from_file_location('audiobook_epub_converter', CONVERTER)
@@ -37,7 +40,9 @@ def load_converter():
 
 
 class AudiobookWindow(QMainWindow):
+    """Legacy Qt converter UI retained for reference and backwards compatibility."""
     def __init__(self):
+        """Build the original GUI controls and initialize conversion process state."""
         super().__init__()
         self.setWindowTitle('AudiobookAI — EPUB Converter')
         self.resize(1080, 760)
@@ -147,22 +152,26 @@ class AudiobookWindow(QMainWindow):
         self.refresh_controls()
 
     def append_log(self, text):
+        """Append output to the legacy converter log viewer."""
         if text:
             self.log.appendPlainText(text.rstrip('\n'))
             scroll = self.log.verticalScrollBar()
             scroll.setValue(scroll.maximum())
 
     def show_error(self, title, err):
+        """Display an error message to the user."""
         QMessageBox.critical(self, title, str(err))
         self.append_log(f'ERROR: {err}')
 
     def choose_book(self):
+        """Open a file picker to select an EPUB."""
         start = str((ROOT / 'books') if (ROOT / 'books').exists() else ROOT)
         selected, _ = QFileDialog.getOpenFileName(self, 'Choose an EPUB', start, 'EPUB books (*.epub)')
         if selected:
             self.load_book(Path(selected))
 
     def load_book(self, path):
+        """Inspect the selected EPUB and populate its section checkboxes."""
         if self.proc is not None:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -197,6 +206,7 @@ class AudiobookWindow(QMainWindow):
         self.update_selection()
 
     def select_all(self, select):
+        """Check or uncheck every section."""
         self.chapter_list.blockSignals(True)
         for i in range(self.chapter_list.count()):
             self.chapter_list.item(i).setCheckState(Qt.Checked if select else Qt.Unchecked)
@@ -204,6 +214,7 @@ class AudiobookWindow(QMainWindow):
         self.update_selection()
 
     def select_story(self):
+        """Select sections that match likely story chapter headings."""
         self.chapter_list.blockSignals(True)
         for i in range(self.chapter_list.count()):
             item = self.chapter_list.item(i)
@@ -213,17 +224,20 @@ class AudiobookWindow(QMainWindow):
         self.update_selection()
 
     def selected_indices(self):
+        """Collect selected section numbers in spine order."""
         return [self.chapter_list.item(i).data(Qt.UserRole)
                 for i in range(self.chapter_list.count())
                 if self.chapter_list.item(i).checkState() == Qt.Checked]
 
     def update_selection(self, *_):
+        """Refresh selection counts and conversion controls."""
         nums = self.selected_indices()
         words = sum(len(self.sections[n - 1].text.split()) for n in nums)
         self.selection_label.setText(f'{len(nums)} section(s) selected • {words:,} words')
         self.refresh_controls()
 
     def refresh_controls(self):
+        """Enable and disable buttons based on whether generation is active."""
         running = self.proc is not None
         valid = self.book_path is not None and bool(self.selected_indices())
         self.choose_btn.setEnabled(not running)
@@ -238,6 +252,7 @@ class AudiobookWindow(QMainWindow):
         self.open_btn.setEnabled(self.book_path is not None)
 
     def start_job(self, command):
+        """Launch the requested legacy conversion command in a subprocess."""
         if self.proc is not None or self.book_path is None:
             return
         indices = self.selected_indices()
@@ -272,6 +287,7 @@ class AudiobookWindow(QMainWindow):
         self.refresh_controls()
 
     def read_output(self):
+        """Append streamed conversion output from the child process."""
         if self.proc is None:
             return
         raw = bytes(self.proc.readAllStandardOutput()).decode('utf-8', errors='replace')
@@ -289,6 +305,7 @@ class AudiobookWindow(QMainWindow):
             self.parse_progress(line)
 
     def parse_progress(self, line):
+        """Infer chapter and chunk progress from legacy text logs."""
         start = re.search(r'^\[(\d+)/(\d+)\]\s+(.*?)(?:\s+—\s+(\d+) chunks|\s+\(\d+ chunks\))?$', line)
         if start:
             index = int(start.group(1))
@@ -315,6 +332,7 @@ class AudiobookWindow(QMainWindow):
             self.progress_text.setText('M4B export complete')
 
     def update_progress(self):
+        """Display the current estimated legacy conversion progress."""
         if not self.expected:
             return
         fraction = len(self.finished_sections)
@@ -329,6 +347,7 @@ class AudiobookWindow(QMainWindow):
             self.progress_text.setText(f'{len(self.finished_sections)}/{self.expected} sections finished')
 
     def stop_job(self):
+        """Ask the child converter to stop without discarding completed files."""
         if self.proc is None:
             return
         self.stop_requested = True
@@ -340,6 +359,7 @@ class AudiobookWindow(QMainWindow):
         QTimer.singleShot(12000, self.offer_force_stop)
 
     def offer_force_stop(self):
+        """Offer forced termination when graceful stop stalls."""
         if self.proc is None or self.proc.state() == QProcess.NotRunning:
             return
         reply = QMessageBox.question(
@@ -351,10 +371,12 @@ class AudiobookWindow(QMainWindow):
             self.proc.kill()
 
     def process_error(self, error):
+        """Display the child process error description."""
         if self.proc is not None:
             self.append_log(f'Process error: {self.proc.errorString()}')
 
     def job_finished(self, exit_code, status):
+        """Handle success, failure, or user stop after the child exits."""
         self.read_output()
         if self.buffer.strip():
             self.append_log(self.buffer.strip())
@@ -376,6 +398,7 @@ class AudiobookWindow(QMainWindow):
         self.refresh_controls()
 
     def open_output(self):
+        """Open the completed audiobook output directory."""
         if self.book_path is None or self.converter is None:
             return
         folder = self.converter.book_folder(self.book_path)
@@ -383,6 +406,7 @@ class AudiobookWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def closeEvent(self, event):
+        """Handle window closing while a conversion may be running."""
         if self.proc is not None:
             QMessageBox.information(self, 'Conversion running',
                                     'Stop the conversion before closing the window. You can resume afterward.')
@@ -392,6 +416,7 @@ class AudiobookWindow(QMainWindow):
 
 
 def main():
+    """Parse command-line arguments and dispatch the requested operation."""
     app = QApplication(sys.argv)
     app.setApplicationName('AudiobookAI')
     window = AudiobookWindow()

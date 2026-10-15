@@ -16,6 +16,7 @@ import audiobookai_production as p
 
 
 class FakeEngine:
+    """Tiny engine stub exposing the raw cache directory and deterministic cache keys."""
     SMOOTH_VERSION = 'v7-smooth-1'
     FINAL_CONTINUATION_PAUSE = .055
     EDGE_KEEP_SECONDS = .065
@@ -28,21 +29,28 @@ class FakeEngine:
     LEADING_PAD_FINAL = .1
     MAX_PEAK = .92
     def __init__(self, cache):
+        """Initialize this isolated test double with its minimal in-memory state."""
         self.CACHE_DIR = cache
         cache.mkdir(parents=True, exist_ok=True)
     def cache_key(self, text):
+        """Build the cache identity for this text and the current narration configuration."""
         return hashlib.sha256(text.encode()).hexdigest()[:24]
     def make_chunks(self, text):
+        """Produce ordered narration chunks with sentence and paragraph boundary metadata."""
         return [type('Chunk', (), dict(text=t, boundary='end' if i == len(text.split('\n\n'))-1 else 'sentence', dialogue=False))()
                 for i, t in enumerate(text.split('\n\n'))]
     def clean_tensor(self, clip):
+        """Normalize generated audio into the channel and sample shape expected by assembly."""
         return clip.float()
     def assemble(self, chunks, recordings, sr):
+        """Concatenate speech with context-sensitive pauses and final peak normalization."""
         return torch.cat(recordings, dim=-1), 0.0
 
 
 class RebuildTests(unittest.TestCase):
+    """Regression cases for rebuild behavior."""
     def test_offline_rebuild_new_take_and_export(self):
+        """Rebuild audio using selected takes and export an M4B without GPU synthesis."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             epub = root / 'book.epub'
