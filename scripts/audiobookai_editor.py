@@ -32,6 +32,21 @@ class ChunkEditor(QDialog):
         self.folder = Path(folder)
         self.chapter = int(chapter)
         self.voice_path = str(voice_path) if voice_path else None
+        # Each chapter retains its own immutable dictionary version. This avoids
+        # reindexing/rebuilding old parts with newer pronunciation rules.
+        self.pronunciation_snapshot = None
+        self.missing_pronunciation_snapshot = None
+        try:
+            manifest = json.loads((self.folder / 'manifest.json').read_text(encoding='utf-8'))
+            raw = manifest.get('chapters', {}).get(str(self.chapter), {}).get('pronunciation_snapshot')
+            if raw:
+                saved = Path(raw)
+                if saved.is_file():
+                    self.pronunciation_snapshot = str(saved)
+                else:
+                    self.missing_pronunciation_snapshot = str(saved)
+        except (OSError, ValueError, TypeError):
+            pass
         self.completed_jobs = list(completed_jobs)
         self.proc = None
         self.commands = []
@@ -86,7 +101,9 @@ class ChunkEditor(QDialog):
         self.logs.setMaximumHeight(150)
         self.logs.setMaximumBlockCount(300)
         root.addWidget(self.logs)
-        if not production.index_path(self.folder, self.chapter).exists():
+        if self.missing_pronunciation_snapshot:
+            self.banner.setText('Missing pronunciation snapshot: restore the saved job file before editing/rebuilding this chapter.')
+        if not production.index_path(self.folder, self.chapter).exists() and not self.missing_pronunciation_snapshot:
             self.index_chapter()
         else:
             self.reload()
@@ -94,15 +111,23 @@ class ChunkEditor(QDialog):
     def button(self, text, func):
         """Build a push button connected to an editor command."""
         button = QPushButton(text)
+        if self.missing_pronunciation_snapshot and func.__name__ in ('index_chapter', 'generate_take', 'audit', 'rebuild'):
+            button.setEnabled(False)
+            button.setToolTip('Original per-chapter pronunciation snapshot must be restored first.')
         button.clicked.connect(func)
         return button
 
     def voice_args(self):
         """Encode the chapter’s fixed narrator selection for child converter calls."""
-        return ['--voice', self.voice_path] if self.voice_path else []
+        arguments = ['--voice', self.voice_path] if self.voice_path else []
+        if self.pronunciation_snapshot:
+            arguments += ['--pronunciation-file', self.pronunciation_snapshot]
+        return arguments
 
     def command(self, action, **kwargs):
         """Build an argv list for a converter action without shell interpolation."""
+        if self.missing_pronunciation_snapshot:
+            raise FileNotFoundError('Missing chapter pronunciation snapshot: ' + self.missing_pronunciation_snapshot)
         args = ['-u', str(SCRIPT), action, str(self.book_path),
                 '--chapters', str(self.chapter), *self.voice_args()]
         for key, value in kwargs.items():

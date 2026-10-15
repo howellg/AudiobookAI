@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "global": [
+    {
+      "term": "Nynaeve",
+      "spoken": "Nigh-neev"
+    },
+    {
+      "term": "Aes Sedai",
+      "spoken": "Eye-suh-dye"
+    }
+  ],
+  "books": {}
+}

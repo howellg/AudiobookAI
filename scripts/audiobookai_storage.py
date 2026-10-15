@@ -131,6 +131,7 @@ class Store:
             'current_total': 'INTEGER NOT NULL DEFAULT 0',
             'updated': 'TEXT',
             'voice_path': 'TEXT',
+            'pronunciation_required': 'INTEGER NOT NULL DEFAULT 0',
         }
         for field, column_sql in new_columns.items():
             if field not in cols:
@@ -192,12 +193,13 @@ class Store:
         self.db.execute('DELETE FROM books WHERE id=?', (book_id,))
         self.changed()
 
-    def add_job(self, book_id, name, indices, output_name, voice_path=None):
+    def add_job(self, book_id, name, indices, output_name, voice_path=None, pronunciation_required=False):
         """Create a queued batch with selected indices and a fixed narrator path."""
-        new_id = self.db.execute('''INSERT INTO jobs(book_id,name,indices,output_name,status,added,updated,voice_path)
-                                    VALUES(?,?,?,?,?,?,?,?)''',
+        new_id = self.db.execute('''INSERT INTO jobs(book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required)
+                                    VALUES(?,?,?,?,?,?,?,?,?)''',
                                  (book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
-                                  str(voice_path) if voice_path else None)).lastrowid
+                                  str(voice_path) if voice_path else None,
+                                  1 if pronunciation_required else 0)).lastrowid
         self.changed()
         return new_id
 

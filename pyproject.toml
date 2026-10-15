@@ -3,7 +3,7 @@
 
 [project]
 name = "audiobookai-studio"
-version = "2.4.0"
+version = "2.5.0"
 description = "Local EPUB-to-audiobook studio powered by Chatterbox TTS"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"

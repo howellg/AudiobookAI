@@ -326,3 +326,16 @@ The project's [MIT license](LICENSE) applies only to original source and documen
 This repository presently documents a **Linux source install**, not a universal turnkey installer. AMD ROCm, CPU-only, Windows, macOS, a bundled read-along EPUB reader, and distributable AppImage packaging are not yet validated or shipped in this source archive.
 
 [← Back to README](README.md)
+
+## V2.5 pronunciation dictionaries
+
+Open the **Pronunciation** sidebar page after importing an EPUB. Add a global
+rule or select **Specific book** to override a term for just that title.
+For compatibility, no new Python dependencies are needed.
+
+Each newly queued part saves its pronunciation snapshot under
+`output/pronunciation/jobs/`. These files are deliberately not included in
+public Git repositories, but **must be backed up** if you plan to rebuild
+archival chapter audio later. Editing a rule does not alter existing jobs;
+re-queue a new part if you want updated pronunciation, and keep a separate
+backup before regenerating chapters that already exist.

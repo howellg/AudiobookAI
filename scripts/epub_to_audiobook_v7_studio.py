@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import audiobookai_production as production
+from audiobookai_pronunciation import load_snapshot, apply_rules, rules_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOKS = ROOT / "books"
@@ -37,6 +38,8 @@ ENGINE_FILE = Path(__file__).with_name("test_five_minutes_v7_smooth.py")
 STUDIO_EVENTS = False
 STOP_REQUESTED = False
 ACTIVE_VOICE = None  # CLI --voice; None leaves original V7 paths unchanged.
+ACTIVE_PRONUNCIATIONS = []  # Only set from an immutable per-job snapshot.
+PRONUNCIATION_SNAPSHOT = None
 
 
 def emit_event(kind, **values):
@@ -230,7 +233,12 @@ def book_folder(path: Path, voice_path: Path | None = None):
 
 def chapter_signature(engine, section):
     """Hash the text, narrator, and assembly settings used to build a chapter."""
+    # Chunk original EPUB prose FIRST so rule edits cannot alter section boundaries.
+    # Only new jobs carrying an explicit snapshot replace spoken chunk text.
     chunks = engine.make_chunks(section.text)
+    if ACTIVE_PRONUNCIATIONS:
+        for chunk in chunks:
+            chunk.text = apply_rules(chunk.text, ACTIVE_PRONUNCIATIONS)
     signature = {"chunks": [(c.text, c.boundary, c.dialogue) for c in chunks],
                  "voice": [engine.cache_key(c.text) for c in chunks],
                  "smooth_version": engine.SMOOTH_VERSION,
@@ -370,6 +378,7 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
             "title": section.title, "signature": signature, "edits_digest": edits_digest,
             "samples": samples,
             "sample_rate": model.sr, "chunks": len(chunks), "wav": str(target),
+            "pronunciation_snapshot": str(PRONUNCIATION_SNAPSHOT) if PRONUNCIATION_SNAPSHOT else None,
         }
         atomic_json(manifest_path, manifest)
         print(f"Saved {target.name}: {samples/model.sr/60:.1f} minutes; +{silence:.1f}s silence", flush=True)
@@ -439,6 +448,7 @@ def rebuild_chapters(epub_path, title, author, sections, chosen, out):
             'title': section.title, 'signature': signature, 'edits_digest': digest,
             'samples': audio.shape[-1], 'sample_rate': sr, 'chunks': len(chunks),
             'wav': str(target),
+            'pronunciation_snapshot': str(PRONUNCIATION_SNAPSHOT) if PRONUNCIATION_SNAPSHOT else None,
         }
         manifest.update({'book': title, 'author': author, 'source': str(epub_path.resolve()),
                          'voice_path': str(ACTIVE_VOICE) if ACTIVE_VOICE else None})
@@ -569,7 +579,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
 
 def main():
     """Handle inspect, convert, rebuild, audit, and export actions from the CLI."""
-    global STUDIO_EVENTS, ACTIVE_VOICE
+    global STUDIO_EVENTS, ACTIVE_VOICE, ACTIVE_PRONUNCIATIONS, PRONUNCIATION_SNAPSHOT
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -579,11 +589,18 @@ def main():
     parser.add_argument("--no-export", action="store_true", help="Convert to chapter WAVs without encoding M4B")
     parser.add_argument("--output-name", help="Unique M4B basename; recommended for batch exports")
     parser.add_argument("--voice", type=Path, help="Alternate narrator reference WAV; omitted uses the original British narrator")
+    parser.add_argument("--pronunciation-file", type=Path,
+                        help="Immutable per-job spoken-text substitutions (new jobs only)")
     parser.add_argument("--studio-events", action="store_true", help="Print machine-readable JSON progress events")
     parser.add_argument("--chunk", type=int, help="1-based chunk number for render-chunk")
     parser.add_argument("--replacement-text", help="New spoken text for render-chunk")
     args = parser.parse_args()
     STUDIO_EVENTS = args.studio_events
+    if args.pronunciation_file is not None:
+        PRONUNCIATION_SNAPSHOT = args.pronunciation_file.expanduser().resolve()
+        ACTIVE_PRONUNCIATIONS = load_snapshot(PRONUNCIATION_SNAPSHOT)
+        print(f'Pronunciation dictionary: {len(ACTIVE_PRONUNCIATIONS)} rules '
+              f'(snapshot {rules_digest(ACTIVE_PRONUNCIATIONS)})', flush=True)
     if args.voice is not None:
         ACTIVE_VOICE = args.voice.expanduser().resolve()
         if not ACTIVE_VOICE.is_file() or ACTIVE_VOICE.suffix.lower() != '.wav':

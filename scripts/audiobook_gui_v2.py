@@ -43,6 +43,10 @@ from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
+from audiobookai_pronunciation import (
+    scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
+    snapshot_for_job, snapshot_path_for_job,
+)
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -126,7 +130,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.4 · Production tools')
+        self.setWindowTitle('AudiobookAI Studio — V2.5 · Production tools')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -176,12 +180,12 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.4 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.5 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -207,6 +211,7 @@ class Studio(QMainWindow):
         self.make_review_page()
         self.make_settings_page()
         self.make_quality_page()
+        self.make_pronunciation_page()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -276,6 +281,8 @@ class Studio(QMainWindow):
             self.refresh_settings()
         if index == 5 and self.quality_proc is None:
             self.quality_book_changed()
+        if index == 6:
+            self.pronunciation_refresh_books()
 
     def make_library_page(self):
         """Build the imported-books table and library actions."""
@@ -922,6 +929,170 @@ class Studio(QMainWindow):
         QMessageBox.information(self, 'Chapter not ready',
             'This chapter has no assembled WAV to edit yet. Rebuild the missing chapter first.')
 
+    def make_pronunciation_page(self):
+        """Edit global/book-level text hints for NEW queued audio only.
+
+        Chatterbox consumes ordinary text rather than an IPA lexicon. A spoken
+        hint is a phonetic respelling and does not guarantee model compliance.
+        """
+        layout = self.page_base('Pronunciation dictionary',
+            'Teach future narration how to read names and unusual words. '
+            'Changes apply to NEW queued parts only. Existing jobs, WAVs and M4Bs stay unchanged.')
+        selection = QHBoxLayout()
+        selection.addWidget(QLabel('Dictionary:'))
+        self.pron_scope = QComboBox()
+        self.pron_scope.addItem('Global (all books)', 'global')
+        self.pron_scope.addItem('Specific book', 'book')
+        self.pron_scope.currentIndexChanged.connect(self.pronunciation_refresh)
+        selection.addWidget(self.pron_scope)
+        self.pron_book = QComboBox()
+        self.pron_book.currentIndexChanged.connect(self.pronunciation_refresh)
+        selection.addWidget(self.pron_book, 2)
+        layout.addLayout(selection)
+        self.pron_table = QTableWidget(0, 2)
+        self.pron_table.setHorizontalHeaderLabels(['Written in EPUB', 'Spoken text for Chatterbox'])
+        self.setup_table(self.pron_table)
+        self.pron_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.pron_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.pron_table.itemSelectionChanged.connect(self.pronunciation_select)
+        layout.addWidget(self.pron_table, 1)
+        fields = QHBoxLayout()
+        self.pron_term = QLineEdit()
+        self.pron_term.setPlaceholderText('e.g. Nynaeve')
+        self.pron_spoken = QLineEdit()
+        self.pron_spoken.setPlaceholderText('e.g. Nigh-neev')
+        fields.addWidget(QLabel('Written:'))
+        fields.addWidget(self.pron_term, 2)
+        fields.addWidget(QLabel('Say:'))
+        fields.addWidget(self.pron_spoken, 2)
+        layout.addLayout(fields)
+        actions = QHBoxLayout()
+        actions.addWidget(mk_button('Add / update rule', self.pronunciation_save))
+        actions.addWidget(mk_button('Delete selected', self.pronunciation_delete))
+        actions.addWidget(mk_button('Clear fields', self.pronunciation_clear))
+        actions.addStretch()
+        layout.addLayout(actions)
+        preview = QHBoxLayout()
+        self.pron_example = QLineEdit()
+        self.pron_example.setPlaceholderText('Preview a sentence without generating audio…')
+        self.pron_example.textChanged.connect(self.pronunciation_preview)
+        preview.addWidget(self.pron_example, 1)
+        layout.addLayout(preview)
+        self.pron_preview_label = QLabel('Pronunciation preview appears here.')
+        self.pron_preview_label.setWordWrap(True)
+        layout.addWidget(self.pron_preview_label)
+        note = QLabel('Rules replace text only in Chatterbox input; the source EPUB is never edited. '
+            'Book-specific terms override global ones. Queued parts freeze their rules; '
+            'audio review/rebuild uses the saved rules from each chapter. '
+            'Use sound-alike words, not IPA or SSML; actual pronunciation varies by model.')
+        note.setObjectName('muted')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.pronunciation_refresh_books()
+
+    def pronunciation_scope_path(self):
+        """Return the selected editable dictionary scope and EPUB path."""
+        scope = self.pron_scope.currentData()
+        book_id = self.pron_book.currentData()
+        book = self.store.book(book_id) if book_id is not None else None
+        return scope, book['path'] if book is not None else None
+
+    def pronunciation_refresh_books(self):
+        """Refresh the book picker independently from the library/queue selection."""
+        selected = self.pron_book.currentData()
+        self.pron_book.blockSignals(True)
+        self.pron_book.clear()
+        for book in self.store.books():
+            self.pron_book.addItem(f"{book['title']} — {book['author']}", book['id'])
+        index = self.pron_book.findData(selected if selected is not None else self.current_book_id)
+        if index >= 0:
+            self.pron_book.setCurrentIndex(index)
+        self.pron_book.blockSignals(False)
+        self.pronunciation_refresh()
+
+    def pronunciation_refresh(self, *_):
+        """Display only global OR current book rules without recreating other pages."""
+        if not hasattr(self, 'pron_table'):
+            return
+        scope, path = self.pronunciation_scope_path()
+        self.pron_book.setEnabled(scope == 'book')
+        try:
+            rules = sorted(scoped_rules(scope, path), key=lambda r: r['term'].casefold())
+        except Exception as exc:
+            self.statusBar().showMessage(f'Pronunciation dictionary could not be read: {exc}')
+            rules = []
+        table = self.pron_table
+        table.blockSignals(True)
+        table.setRowCount(len(rules))
+        for row, rule in enumerate(rules):
+            for column, value in enumerate((rule['term'], rule['spoken'])):
+                existing = table.item(row, column)
+                if existing is None:
+                    table.setItem(row, column, item(value))
+                elif existing.text() != value:
+                    existing.setText(value)
+        table.blockSignals(False)
+        self.pronunciation_preview()
+
+    def pronunciation_select(self):
+        """Copy selected dictionary entry into editable fields."""
+        row = self.pron_table.currentRow()
+        if row >= 0:
+            source = self.pron_table.item(row, 0)
+            spoken = self.pron_table.item(row, 1)
+            if source and spoken:
+                self.pron_term.setText(source.text())
+                self.pron_spoken.setText(spoken.text())
+
+    def pronunciation_clear(self):
+        """Clear entry fields without deleting anything from the dictionary."""
+        self.pron_term.clear()
+        self.pron_spoken.clear()
+        self.pron_table.clearSelection()
+
+    def pronunciation_save(self):
+        """Save a single mapping for future jobs; existing snapshots remain frozen."""
+        try:
+            scope, path = self.pronunciation_scope_path()
+            save_rule(scope, path, self.pron_term.text(), self.pron_spoken.text())
+        except Exception as exc:
+            self.error('Invalid pronunciation rule', exc)
+            return
+        self.pronunciation_refresh()
+        self.statusBar().showMessage('Saved pronunciation rule for new queued parts.')
+
+    def pronunciation_delete(self):
+        """Remove the entry under the selected scope, not rules in other scopes."""
+        row = self.pron_table.currentRow()
+        entry = self.pron_table.item(row, 0) if row >= 0 else None
+        if entry is None:
+            return
+        try:
+            scope, path = self.pronunciation_scope_path()
+            delete_rule(scope, path, entry.text())
+        except Exception as exc:
+            self.error('Unable to delete pronunciation rule', exc)
+            return
+        self.pronunciation_clear()
+        self.pronunciation_refresh()
+        self.statusBar().showMessage('Deleted dictionary rule for future queued parts.')
+
+    def pronunciation_preview(self, *_):
+        """Show a safe, text-only approximation of substitutions before synthesis."""
+        example = self.pron_example.text()
+        scope, path = self.pronunciation_scope_path()
+        if not example:
+            self.pron_preview_label.setText('Enter a sentence to preview spoken-text substitutions.')
+            return
+        try:
+            if scope == 'global' or not path:
+                rules = scoped_rules('global', None)
+            else:
+                rules = effective_rules(path)
+            self.pron_preview_label.setText('Spoken text: ' + apply_rules(example, rules))
+        except Exception as exc:
+            self.pron_preview_label.setText(f'Preview unavailable: {exc}')
+
     def make_settings_page(self):
         """Build optional MySQL, cache, and application settings controls."""
         l = self.page_base('Settings & MySQL',
@@ -1466,7 +1637,18 @@ class Studio(QMainWindow):
             name = f'Part {i:02d} · sections {span}' if len(parts) > 1 else f'Sections {span}'
             suffix = uuid.uuid4().hex[:12]
             output_base = self.converter.safe_name(f"{book['title']}_part_{i:02d}_sections_{span}_{suffix}", 125)
-            self.store.add_job(self.current_book_id, name, numbers, output_base, fixed_voice)
+            # A new part captures the dictionary as it exists NOW. This file is
+            # never updated on subsequent dictionary edits or GUI restarts.
+            new_job_id = self.store.add_job(self.current_book_id, name, numbers, output_base,
+                                            fixed_voice, pronunciation_required=True)
+            try:
+                snapshot_for_job(new_job_id, book['path'])
+            except Exception as exc:
+                # Never queue a job that might silently ignore intended rules.
+                self.store.remove_job(new_job_id)
+                self.refresh_jobs()
+                self.error('Unable to snapshot pronunciation rules', exc)
+                return
         self.refresh_jobs()
         self.change_page(2)
         self.write_log(f"Queued {len(parts)} part(s) from '{book['title']}' ({len(selected)} sections).")
@@ -1591,6 +1773,17 @@ class Studio(QMainWindow):
         nums = json.loads(job['indices'])
         arguments = ['-u', str(CONVERTER_FILE), 'convert', str(epub),
                      '--chapters', ','.join(map(str, nums)), '--output-name', job['output_name'], '--studio-events']
+        snapshot = snapshot_path_for_job(job_id) if job['pronunciation_required'] else None
+        if job['pronunciation_required'] and snapshot is None:
+            self.store.update_job(job_id, 'failed', error='Queued pronunciation snapshot is missing')
+            self.refresh_jobs()
+            self.run_queue = False
+            self.error('Missing pronunciation snapshot',
+                'The queued dictionary snapshot is missing. Restore output/pronunciation/jobs/ '
+                'from your backup; this job will not run with different pronunciations.')
+            return
+        if snapshot is not None:
+            arguments.extend(['--pronunciation-file', str(snapshot)])
         if job['voice_path']:
             voice = Path(job['voice_path'])
             if not voice.is_file():

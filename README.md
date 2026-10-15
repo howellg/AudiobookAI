@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.4**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.5**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -153,3 +153,19 @@ AudiobookAI's original source code and documentation are available under the **[
 Dependency requirements are declared in [`pyproject.toml`](pyproject.toml). **The repository does not yet include a tested `uv.lock`**: a fully reproducible GPU installation requires validating and locking the PyTorch/CUDA/Chatterbox versions on an actual supported machine. See [INSTALL.md](INSTALL.md#dependency-manifest-and-locking).
 
 Bug reports should include the OS, Python/PyTorch versions, GPU, relevant (redacted) logs, and a small reproducible test case. Never attach copyrighted EPUBs, narrator recordings, credentials, or full audiobook outputs to issues.
+
+### V2.5 pronunciation dictionary
+
+Open **Pronunciation** in the sidebar to add global or book-specific text
+substitutions (for example `Nynaeve` → `Nigh-neev`). Book rules override global
+rules. Use **Preview** to inspect the text that Chatterbox receives; this is
+ordinary respelling, not IPA or guaranteed phoneme control. The original EPUB
+is never edited.
+
+Rules are frozen **when you queue a new part**. Old jobs, chapter WAVs, cached
+speech, and M4Bs are not automatically regenerated. In the audio editor, each
+chapter's saved pronunciation snapshot is used for indexing and rebuilding.
+The editable dictionary and per-job snapshots are stored in the ignored
+`output/pronunciation/` directory. **Back up this directory together with
+`output/audiobooks/` and your SQLite database** if you migrate computers or
+want to rebuild chapters years later.
