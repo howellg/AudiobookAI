@@ -2721,12 +2721,28 @@ class Studio(QMainWindow):
         if ask == QMessageBox.Yes and self.proc is not None:
             self.proc.kill()
 
-    def process_error(self, _error):
-        """Record a Qt subprocess error message for diagnosis."""
-        if self.proc is not None:
-            message = f'Process error: {self.proc.errorString()}'
-            self.diagnostic_lines.append(message)
-            self.write_log(message)
+    def process_error(self, error):
+        """Persist converter launch failures instead of leaving a phantom running job."""
+        if self.proc is None:
+            return
+        message = f'Process error: {self.proc.errorString()}'
+        self.diagnostic_lines.append(message)
+        self.write_log(message)
+        if error == QProcess.FailedToStart:
+            job_id = self.active_job_id
+            if job_id is not None:
+                self.store.update_job(job_id, 'failed',
+                    error=f'Converter could not start: {message}' +
+                          (f' · Log: {self.active_job_log}' if self.active_job_log else ''))
+            failed_process = self.proc
+            self.proc = None
+            self.active_job_log = None
+            self.active_job_id = None
+            self.run_queue = False
+            failed_process.deleteLater()
+            self.active_title.setText('Converter failed to start — see log')
+            self.refresh_jobs()
+            self.statusBar().showMessage('Converter could not start; queue paused.')
 
     def process_finished(self, exit_code, exit_status):
         """Verify an export and transition the job to complete, interrupted, or failed."""
