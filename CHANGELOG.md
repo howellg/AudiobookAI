@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.7.0 (unreleased) — Read Along preview
+
+- Read-only chapter transcript synchronized approximately to saved WAV playback.
+- Click chunks to seek, scrub chapter audio and open the existing audio editor.
+- Narrator and completed-chapter selection without TTS or database writes.
+- Five offline tests for timeline mapping, missing caches and invalid manifests.
+- Exact chunk timestamps and original EPUB text fidelity remain follow-up work.
+
+
 ## 2.6.0 (unreleased) — Archive Manager preview
 
 - New Archive page for narrator-specific completed editions.
