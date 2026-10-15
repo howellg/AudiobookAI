@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.8.1 — Pronunciation snapshot ID hotfix
+
+- Preserve immutable pronunciation snapshots when older queue entries have been deleted.
+- Allocate new queue job IDs above active rows, historical snapshot filenames, and a persistent sequence.
+- Prevent new EPUB sections from failing to queue due to reused `job_1.json` or similar names.
+- Add regression tests for deleted jobs, existing snapshots, and restarting SQLite.
+
+
 ## 2.8.0 — Reliability & Recovery
 
 - Safely requeue only validated interrupted jobs, retaining cached generation progress.
