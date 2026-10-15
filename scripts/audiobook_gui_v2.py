@@ -788,9 +788,10 @@ class Studio(QMainWindow):
         self.write_log(f'ERROR: {message}')
 
     def write_log(self, text):
-        self.logs.appendPlainText(text)
-        sb = self.logs.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        # QPlainTextEdit maintains the scroll position automatically when
+        # appending; avoid retaining a transient QScrollBar wrapper after
+        # appendPlainText() causes internal Qt layout/scrollbar changes.
+        self.logs.appendPlainText(str(text))
 
     def focus_search(self):
         page = self.stack.currentIndex()
@@ -1078,19 +1079,48 @@ class Studio(QMainWindow):
             self.start_queue()
 
     def refresh_jobs(self):
+        """Refresh the queue table without repeatedly destroying QTableWidgetItems.
+
+        Qt owns every QTableWidgetItem supplied with setItem(). Updating an
+        existing item's text/data minimizes C++ wrapper churn during a long
+        conversion, and blocking signals prevents partially filled row access.
+        """
         jobs = self.store.jobs()
+        table = self.job_table
         selected_job = self.selected_job_id()
-        self.job_table.setRowCount(len(jobs))
-        for r, job in enumerate(jobs):
-            nums = json.loads(job['indices'])
-            data = (job['name'], job['book_title'], f'{len(nums)}',
-                    voice_name(job['voice_path']), job['status'].title(),
-                    f"{round(100 * job['completed_chunks']/job['total_chunks'])}%" if job['total_chunks'] else '—',
-                    job['added'])
-            for c, value in enumerate(data):
-                self.job_table.setItem(r, c, item(value, job['id'] if c == 0 else None))
-            if job['id'] == selected_job:
-                self.job_table.selectRow(r)
+        was_sorted = table.isSortingEnabled()
+        previous_signals = table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            table.setSortingEnabled(False)
+            table.setRowCount(len(jobs))
+            selected_row = None
+            for r, job in enumerate(jobs):
+                nums = json.loads(job['indices'])
+                values = (job['name'], job['book_title'], str(len(nums)),
+                          voice_name(job['voice_path']), job['status'].title(),
+                          f"{round(100 * job['completed_chunks']/job['total_chunks'])}%"
+                          if job['total_chunks'] else '—', job['added'])
+                for c, value in enumerate(values):
+                    cell = table.item(r, c)
+                    if cell is None:
+                        table.setItem(r, c, item(value, job['id'] if c == 0 else None))
+                    else:
+                        if cell.text() != str(value):
+                            cell.setText(str(value))
+                        if c == 0 and cell.data(Qt.UserRole) != job['id']:
+                            cell.setData(Qt.UserRole, job['id'])
+                if job['id'] == selected_job:
+                    selected_row = r
+            if selected_row is not None:
+                table.selectRow(selected_row)
+            else:
+                table.clearSelection()
+                table.setCurrentCell(-1, -1)
+        finally:
+            table.setSortingEnabled(was_sorted)
+            table.setUpdatesEnabled(True)
+            table.blockSignals(previous_signals)
         self.filter_queue()
 
     def selected_job_id(self):
@@ -1260,7 +1290,11 @@ class Studio(QMainWindow):
             self.exporting = False
             self.last_output_path = event['path']
             self.write_log(f"Finished M4B: {self.last_output_path} ({fmt_size(event['size_bytes'])})")
-        self.paint_progress()
+        # Coalesce cached chunk repaint bursts; always paint chapter/export boundaries.
+        paint_time = time.monotonic()
+        if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 0.4:
+            self.paint_progress()
+            self._last_paint = paint_time
         if kind in ('plan', 'chapter_started', 'chapter_done', 'export_started', 'export_done'):
             self.persist_progress(force=True)
         elif kind == 'chunk_done':
