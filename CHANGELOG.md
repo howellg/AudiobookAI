@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.0 (unreleased) — Reliability & Recovery preview
+
+- Safely requeue only validated interrupted jobs, retaining cached generation progress.
+- Save bounded per-job converter logs with diagnostic failure hints.
+- Make consistent SQLite and pronunciation metadata ZIP backups on startup/periodically.
+- Add manual backup and SHA256 verification controls; keep 10 rolling auto backups.
+- Backups are metadata-only and never overwrite a live library.
+- Add regression tests for recovery checks, crash state migration and backups.
+
+
 ## 2.7.0 — Read Along
 
 - Read-only chapter transcript synchronized approximately to saved WAV playback.
