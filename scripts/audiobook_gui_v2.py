@@ -42,6 +42,7 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
+from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
 from audiobookai_pronunciation import (
     scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
@@ -130,7 +131,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.5 · Production tools')
+        self.setWindowTitle('AudiobookAI Studio — V2.6 Preview · Archive Manager')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -166,6 +167,9 @@ class Studio(QMainWindow):
         self.review_manifest = {}
         self.full_export_proc = None
         self.full_export_target = None
+        self.archive_proc = None
+        self.archive_output = None
+        self.archive_groups = []
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -180,12 +184,12 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.5 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.6 PREVIEW · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -212,6 +216,7 @@ class Studio(QMainWindow):
         self.make_settings_page()
         self.make_quality_page()
         self.make_pronunciation_page()
+        self.make_archive_page()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -283,6 +288,8 @@ class Studio(QMainWindow):
             self.quality_book_changed()
         if index == 6:
             self.pronunciation_refresh_books()
+        if index == 7 and self.archive_proc is None:
+            self.archive_refresh_books()
 
     def make_library_page(self):
         """Build the imported-books table and library actions."""
@@ -1092,6 +1099,272 @@ class Studio(QMainWindow):
             self.pron_preview_label.setText('Spoken text: ' + apply_rules(example, rules))
         except Exception as exc:
             self.pron_preview_label.setText(f'Preview unavailable: {exc}')
+
+    def make_archive_page(self):
+        """Build a single-purpose offline archive workflow for completed books.
+
+        The UI never encodes audio itself. It verifies queue sections and
+        launches an isolated worker to create a chapter-marked archival M4B.
+        """
+        l = self.page_base('Archive complete audiobooks',
+            'Package finished parts as one M4B with chapter markers, cover art and library metadata. '
+            'Export directly to an external drive without rerunning narration.', scroll=True)
+        book_row = QHBoxLayout()
+        book_row.addWidget(QLabel('Book:'))
+        self.archive_book = QComboBox()
+        self.archive_book.currentIndexChanged.connect(self.archive_book_changed)
+        book_row.addWidget(self.archive_book, 1)
+        book_row.addWidget(mk_button('Refresh', self.archive_refresh_books))
+        l.addLayout(book_row)
+        narrator_row = QHBoxLayout()
+        narrator_row.addWidget(QLabel('Narrator / finished parts:'))
+        self.archive_narrator = QComboBox()
+        self.archive_narrator.currentIndexChanged.connect(self.archive_narrator_changed)
+        narrator_row.addWidget(self.archive_narrator, 1)
+        l.addLayout(narrator_row)
+        self.archive_summary = QLabel('Select a book to see its completed parts.')
+        self.archive_summary.setWordWrap(True)
+        l.addWidget(self.archive_summary)
+        l.addWidget(title_label('Archival metadata', 14))
+        grid = QGridLayout()
+        self.archive_title = QLineEdit()
+        self.archive_author = QLineEdit()
+        self.archive_series = QLineEdit()
+        self.archive_volume = QLineEdit()
+        self.archive_voice_name = QLineEdit()
+        self.archive_cover = QLineEdit()
+        self.archive_cover.setPlaceholderText('Leave blank to extract the cover from the EPUB automatically')
+        for i, (label, widget) in enumerate([
+            ('Title', self.archive_title), ('Author', self.archive_author),
+            ('Series (optional)', self.archive_series), ('Series number (optional)', self.archive_volume),
+            ('Narrator', self.archive_voice_name), ('Cover JPEG/PNG (optional)', self.archive_cover),
+        ]):
+            grid.addWidget(QLabel(label), i, 0)
+            grid.addWidget(widget, i, 1)
+        grid.addWidget(mk_button('Browse…', self.archive_browse_cover), 5, 2)
+        l.addLayout(grid)
+        row = QHBoxLayout()
+        row.addWidget(mk_button('Save book metadata', self.archive_save_metadata))
+        row.addWidget(mk_button('Export archival M4B…', self.archive_start_export))
+        row.addWidget(mk_button('Open archived folder', self.archive_open_folder))
+        row.addStretch()
+        l.addLayout(row)
+        self.archive_result = QLabel('No archive has been exported for this edition.')
+        self.archive_result.setWordWrap(True)
+        l.addWidget(self.archive_result)
+        guidance = QLabel('An edition is ready only when every queued part for one narrator is finished. '
+            'The worker uses existing WAVs to create or refresh the complete M4B, then copies AAC audio '
+            'without re-encoding it. Archived files are separate from your working parts.')
+        guidance.setWordWrap(True)
+        guidance.setObjectName('muted')
+        l.addWidget(guidance)
+        l.addStretch()
+
+    def archive_refresh_books(self, *_):
+        """Reload archive choices without disturbing the currently selected book."""
+        selected = self.archive_book.currentData()
+        self.archive_book.blockSignals(True)
+        self.archive_book.clear()
+        for book in self.store.books():
+            self.archive_book.addItem(f"{book['title']} — {book['author']}", book['id'])
+        if selected is not None:
+            found = self.archive_book.findData(selected)
+            if found >= 0:
+                self.archive_book.setCurrentIndex(found)
+        self.archive_book.blockSignals(False)
+        self.archive_book_changed()
+
+    def archive_book_changed(self, *_):
+        """List available narrator editions for the selected book."""
+        book_id = self.archive_book.currentData()
+        self.archive_groups = []
+        self.archive_narrator.blockSignals(True)
+        self.archive_narrator.clear()
+        if book_id is not None:
+            try:
+                conv = self.converter or load_converter()
+                self.converter = conv
+                self.archive_groups = collect_export_groups(self.store.jobs(), book_id, conv.book_folder)
+                for group in self.archive_groups:
+                    self.archive_narrator.addItem(
+                        f"{voice_name(group['voice_path'])} — {len(group['parts'])} parts, "
+                        f"{len(group['unfinished'])} unfinished")
+            except Exception as exc:
+                self.archive_summary.setText(f'Unable to inspect editions: {exc}')
+        self.archive_narrator.blockSignals(False)
+        self.archive_narrator_changed()
+
+    def archive_current(self):
+        """Return the selected book and narrator-specific group, or empty values."""
+        book_id = self.archive_book.currentData()
+        idx = self.archive_narrator.currentIndex()
+        if book_id is None or idx < 0 or idx >= len(self.archive_groups):
+            return None, None
+        return self.store.book(book_id), self.archive_groups[idx]
+
+    def archive_narrator_changed(self, *_):
+        """Show completion, duration and previously saved edition metadata."""
+        book, group = self.archive_current()
+        if not book or not group:
+            self.archive_summary.setText('No queued parts for this book yet.')
+            self.archive_result.setText('No archived edition.')
+            return
+        try:
+            metadata = edition_info(Path(book['path']), group['folder'])
+            self.archive_title.setText(metadata.get('title') or book['title'])
+            self.archive_author.setText(metadata.get('author') or book['author'])
+            self.archive_series.setText(metadata.get('series', ''))
+            self.archive_volume.setText(metadata.get('volume', ''))
+            self.archive_voice_name.setText(metadata.get('narrator') or voice_name(group['voice_path']))
+            self.archive_cover.setText(metadata.get('cover', ''))
+            ready = not group['unfinished']
+            length = '—'
+            if ready:
+                indices = verify_export_group(group, int(book['sections']))
+                length = fmt_seconds(audio_duration(group['folder'], indices))
+            self.archive_summary.setText(
+                f"{'Ready for archive' if ready else 'Still generating'} · "
+                f"{len(group['parts'])-len(group['unfinished'])}/{len(group['parts'])} finished parts · "
+                f"{len(group['indices'])} selected sections · {length} audio")
+            exported = Path(metadata.get('last_export', '')) if metadata.get('last_export') else None
+            self.archive_result.setText(f'Last archive: {exported}' if exported and exported.is_file()
+                                        else 'No archived M4B currently found.')
+        except Exception as exc:
+            self.archive_summary.setText(f'Not ready: {exc}')
+            self.archive_result.setText('Finish or repair the missing parts before archiving.')
+
+    def archive_details(self):
+        """Collect user-entered tags without modifying a source EPUB."""
+        return {'title': self.archive_title.text().strip(),
+                'author': self.archive_author.text().strip(),
+                'series': self.archive_series.text().strip(),
+                'volume': self.archive_volume.text().strip(),
+                'narrator': self.archive_voice_name.text().strip(),
+                'cover': self.archive_cover.text().strip()}
+
+    def archive_browse_cover(self):
+        """Select optional user-supplied artwork; otherwise use EPUB artwork."""
+        filename, _ = QFileDialog.getOpenFileName(self, 'Choose cover art', str(Path.home()),
+                                                  'Image files (*.jpg *.jpeg *.png)')
+        if filename:
+            self.archive_cover.setText(filename)
+
+    def archive_save_metadata(self):
+        """Persist local catalog information independently of an actual export."""
+        book, group = self.archive_current()
+        if not book or not group:
+            return
+        try:
+            current = edition_info(Path(book['path']), group['folder'])
+            current.update(self.archive_details())
+            save_edition(Path(book['path']), group['folder'], current)
+            self.statusBar().showMessage('Local archival metadata saved')
+        except Exception as exc:
+            self.error('Unable to save metadata', exc)
+
+    def archive_start_export(self):
+        """Validate completion and start an isolated offline metadata/export worker."""
+        if self.proc is not None or self.full_export_proc is not None or self.archive_proc is not None:
+            QMessageBox.information(self, 'Export busy', 'Finish the active audio task first.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible() and editor.proc is not None:
+            QMessageBox.information(self, 'Audio editor busy', 'Finish the active chapter rebuild first.')
+            return
+        book, group = self.archive_current()
+        if not book or not group:
+            QMessageBox.information(self, 'Select an edition', 'Choose a book and narrator first.')
+            return
+        try:
+            indices = verify_export_group(group, int(book['sections']))
+            details = self.archive_details()
+            if not details['title'] or not details['author']:
+                raise ValueError('Title and author are required for archival export.')
+            if details['cover'] and not Path(details['cover']).is_file():
+                raise ValueError('The selected cover image no longer exists.')
+            filename = re.sub(r'[^\w .-]', '_', details['title']).strip()[:100] or 'audiobook'
+            destination, _ = QFileDialog.getSaveFileName(
+                self, 'Save complete archival audiobook', str(Path.home() / f'{filename}.m4b'),
+                'M4B audiobook (*.m4b)')
+            if not destination:
+                return
+            target = Path(destination)
+            if target.suffix.lower() != '.m4b':
+                target = target.with_suffix('.m4b')
+            if target.exists() and QMessageBox.question(
+                    self, 'Overwrite existing archive', f'Replace the existing file?\n{target}',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            self.archive_save_metadata()
+            args = ['-u', str(SCRIPTS / 'audiobookai_archive.py'),
+                    '--epub', str(book['path']), '--folder', str(group['folder']),
+                    '--indices', ','.join(map(str, indices)), '--destination', str(target)]
+            if group['voice_path']:
+                args += ['--voice', str(group['voice_path'])]
+            for key in ('title', 'author', 'series', 'volume', 'narrator'):
+                args += [f'--{key}', details[key]]
+            if details['cover']:
+                args += ['--cover', details['cover']]
+        except Exception as exc:
+            self.error('Cannot archive this edition', exc)
+            return
+        self.archive_output = target
+        self.archive_proc = QProcess(self)
+        proc = self.archive_proc
+        proc.setProgram(sys.executable)
+        proc.setArguments(args)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self.archive_read_output)
+        proc.finished.connect(self.archive_finished)
+        proc.errorOccurred.connect(self.archive_error)
+        self.archive_result.setText(f'Exporting: {target}')
+        self.statusBar().showMessage('Archiving complete audiobook in the background…')
+        proc.start()
+
+    def archive_read_output(self):
+        """Consume only the available child output without rebuilding tables."""
+        if self.archive_proc is not None:
+            message = bytes(self.archive_proc.readAllStandardOutput()).decode('utf-8', errors='replace')
+            if message.strip():
+                self.write_log(message.rstrip())
+
+    def archive_error(self, error):
+        """Recover the UI state when a child fails before emitting finished."""
+        if self.archive_proc is None:
+            return
+        self.write_log(f'Archive worker process error: {self.archive_proc.errorString()}')
+        if error == QProcess.FailedToStart:
+            self.archive_result.setText('Unable to launch archive worker')
+            self.archive_proc = None
+            self.archive_output = None
+
+    def archive_finished(self, exit_code, exit_status):
+        """Report archive outcome, preserving all existing source recordings."""
+        self.archive_read_output()
+        target = self.archive_output
+        passed = (exit_code == 0 and exit_status == QProcess.NormalExit
+                  and target is not None and target.is_file())
+        self.archive_proc = None
+        self.archive_output = None
+        if passed:
+            self.archive_result.setText(f'Archived successfully: {target} ({fmt_size(target.stat().st_size)})')
+            self.statusBar().showMessage('Complete audiobook archived')
+            self.archive_narrator_changed()
+        else:
+            self.archive_result.setText('Archive failed; existing M4B parts and WAVs are unchanged. See Queue log.')
+            self.statusBar().showMessage('Archive export failed')
+
+    def archive_open_folder(self):
+        """Open the saved archive destination, if still available."""
+        book, group = self.archive_current()
+        if not book or not group:
+            return
+        saved = edition_info(Path(book['path']), group['folder']).get('last_export', '')
+        if saved and Path(saved).is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(saved).parent)))
+        else:
+            QMessageBox.information(self, 'No archive', 'Export a complete edition first.')
 
     def make_settings_page(self):
         """Build optional MySQL, cache, and application settings controls."""
@@ -2449,6 +2722,11 @@ class Studio(QMainWindow):
         if editor is not None and editor.isVisible() and editor.proc is not None:
             QMessageBox.information(self, 'Audio editor busy',
                 'Finish the chunk editing operation before closing AudiobookAI.')
+            event.ignore()
+            return
+        if self.archive_proc is not None:
+            QMessageBox.information(self, 'Archive export in progress',
+                'Finish the archival M4B export before closing AudiobookAI.')
             event.ignore()
             return
         if self.full_export_proc is not None:
