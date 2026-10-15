@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.5**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.6 preview**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -14,11 +14,12 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **Resume and recovery:** Reuse cached speech chunks after interruptions; automatically retry and split chunks in some recoverable generation failures.
 - **Audio review and editing:** Inspect completed chapter audio, edit the spoken text for individual chunks, generate alternate takes, restore previous takes, and rebuild audio from saved recordings.
 - **M4B export:** Assemble completed chapter WAVs into AAC-encoded M4B files with chapter markers. Long books can be exported as separate parts.
+- **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
 - **Optional MySQL mirror:** Synchronize library, chapter, and job metadata to a MySQL database for querying. SQLite remains the authoritative local store; audio itself stays on disk.
 - **Manual cache cleanup:** Preview cache age and storage usage before deleting raw cached WAVs. Completed exports and narrator files are excluded.
 
-**Not implemented yet:** a built-in EPUB read-along player with synchronized highlighting, a pronunciation dictionary, or one-click cross-platform installation.
+**Not implemented yet:** a built-in EPUB read-along player with synchronized highlighting or one-click cross-platform installation.
 
 ## Getting started
 
@@ -169,3 +170,21 @@ The editable dictionary and per-job snapshots are stored in the ignored
 `output/pronunciation/` directory. **Back up this directory together with
 `output/audiobooks/` and your SQLite database** if you migrate computers or
 want to rebuild chapters years later.
+
+### V2.6 Archive Manager (preview)
+
+Choose **Archive** in the sidebar, select a book and narrator, and inspect its
+finished queued parts. When all planned sections are complete and chapter WAVs
+are present, edit title, author, series, volume, narrator, and optional cover.
+An EPUB cover is used automatically when available; a JPEG/PNG can be selected.
+
+Choose **Export archival M4B…** and select a destination. The worker refreshes
+a stale complete M4B from existing chapter WAVs if needed, then copies its
+AAC audio with chapter markers into a metadata-rich archival file. Individual
+parts, chapter WAVs and raw caches remain untouched. The local archive catalog
+is saved under ignored `output/archive/catalog.json`; back it up along with
+your audio if moving computers.
+
+This is a development preview: the Archive GUI should be tested on the target
+Linux machine before relying on it for valuable recordings. Ensure your external
+drive has enough free space and supports large files.
