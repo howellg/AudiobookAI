@@ -44,6 +44,10 @@ from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
+from audiobookai_reliability import (
+    append_diagnostic, check_resume_job, create_metadata_backup,
+    diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
+)
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
 from audiobookai_pronunciation import (
     scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
@@ -132,7 +136,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.7 · Read Along')
+        self.setWindowTitle('AudiobookAI Studio — V2.8 Preview · Reliability')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -171,6 +175,10 @@ class Studio(QMainWindow):
         self.archive_proc = None
         self.archive_output = None
         self.archive_groups = []
+        self.active_job_log = None
+        self.diagnostic_lines = deque(maxlen=40)
+        self.backup_dir = ROOT / 'output' / 'metadata_backups'
+        self.diagnostic_dir = ROOT / 'output' / 'diagnostics'
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -185,7 +193,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.7 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.8 PREVIEW · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -254,6 +262,10 @@ class Studio(QMainWindow):
         self.reconnect_timer.timeout.connect(self.maybe_sync_mysql)
         self.reconnect_timer.start(60000)
         QTimer.singleShot(500, self.connect_saved_mysql)
+        self.backup_timer = QTimer(self)
+        self.backup_timer.timeout.connect(self.maybe_auto_metadata_backup)
+        self.backup_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(3500, self.maybe_auto_metadata_backup)
 
     def page_base(self, heading, intro, scroll=False):
         """Create a page header and layout, optionally using a scrolling container."""
@@ -513,6 +525,8 @@ class Studio(QMainWindow):
             'Finish the active M4B part without starting the next one'))
         bar.addWidget(mk_button('■ Stop safely', self.stop_job))
         bar.addWidget(mk_button('↻ Retry selected', self.retry_selected))
+        bar.addWidget(mk_button('Recover interrupted', self.recover_interrupted,
+            'Requeue interrupted parts only when their source files and snapshots still exist'))
         bar.addWidget(mk_button('Remove selected', self.remove_selected_job))
         bar.addStretch()
         l.addLayout(bar)
@@ -523,6 +537,7 @@ class Studio(QMainWindow):
             'Play the selected completed M4B in your default audiobook player'))
         additional.addWidget(mk_button('Open folder', self.open_selected_output_folder))
         additional.addWidget(mk_button('Copy path', self.copy_selected_output_path))
+        additional.addWidget(mk_button('View job log', self.open_selected_diagnostic))
         additional.addStretch()
         l.addLayout(additional)
         filters = QHBoxLayout()
@@ -1802,6 +1817,25 @@ class Studio(QMainWindow):
         note.setObjectName('muted')
         note.setWordWrap(True)
         l.addWidget(note)
+
+        l.addWidget(title_label('Metadata backups · V2.8', 14))
+        self.backup_status = QLabel('Automatic metadata backups run every 30 minutes and '
+            'retain the newest 10. Copies are initially saved on this same disk.')
+        self.backup_status.setWordWrap(True)
+        self.backup_status.setObjectName('muted')
+        l.addWidget(self.backup_status)
+        backup_buttons = QHBoxLayout()
+        backup_buttons.addWidget(mk_button('Backup metadata now', self.backup_metadata_now))
+        backup_buttons.addWidget(mk_button('Verify latest backup', self.verify_latest_metadata_backup))
+        backup_buttons.addWidget(mk_button('Open backups folder', self.open_metadata_backup_folder))
+        backup_buttons.addStretch()
+        l.addLayout(backup_buttons)
+        backup_tip = QLabel('Metadata-only: SQLite queue, pronunciation rules/snapshots, '
+            'archive catalog and nonsecret configuration. EPUBs, voices, M4Bs, '
+            'chapter WAVs and raw caches must be backed up separately.')
+        backup_tip.setWordWrap(True)
+        backup_tip.setObjectName('muted')
+        l.addWidget(backup_tip)
         l.addStretch()
 
     def mark_mysql_dirty(self):
