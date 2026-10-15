@@ -1,0 +1,151 @@
+# AudiobookAI Studio
+
+**A local EPUB-to-audiobook desktop application built with Python, PySide6, and Chatterbox TTS.**
+
+AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
+
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.4**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+
+## Features
+
+- **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
+- **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
+- **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **Resume and recovery:** Reuse cached speech chunks after interruptions; automatically retry and split chunks in some recoverable generation failures.
+- **Audio review and editing:** Inspect completed chapter audio, edit the spoken text for individual chunks, generate alternate takes, restore previous takes, and rebuild audio from saved recordings.
+- **M4B export:** Assemble completed chapter WAVs into AAC-encoded M4B files with chapter markers. Long books can be exported as separate parts.
+- **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
+- **Optional MySQL mirror:** Synchronize library, chapter, and job metadata to a MySQL database for querying. SQLite remains the authoritative local store; audio itself stays on disk.
+- **Manual cache cleanup:** Preview cache age and storage usage before deleting raw cached WAVs. Completed exports and narrator files are excluded.
+
+**Not implemented yet:** a built-in EPUB read-along player with synchronized highlighting, a pronunciation dictionary, or one-click cross-platform installation.
+
+## Getting started
+
+See **[INSTALL.md](INSTALL.md)** for complete Linux setup, including Python 3.11, Chatterbox/PyTorch, FFmpeg, optional MySQL, a KDE desktop launcher, and troubleshooting.
+
+**Already have a working Chatterbox environment?** Use it rather than recreating it:
+
+```fish
+cd ~/AudiobookAI
+source .venv-chatterbox/bin/activate.fish
+python scripts/audiobook_gui_v2.py
+```
+
+For a fresh clone, follow [INSTALL.md](INSTALL.md) first. You must provide your own DRM-free EPUB and at least one suitable narrator WAV; neither is distributed with this repository.
+
+## Typical workflow
+
+1. Start the desktop application (`python scripts/audiobook_gui_v2.py`).
+2. Under **Library**, import an EPUB. Inspect the detected sections; an EPUB section number may differ from its printed chapter number.
+3. Under **Generate**, select sections, choose a narrator WAV, set a batch size, and add parts to the queue.
+4. Under **Queue**, start or resume generation. A clean stop preserves completed cached speech.
+5. Under **Review audio**, play chapter WAVs, review any problematic chunk, and rebuild audio if you change a take.
+6. Play the exported M4B files using your preferred audiobook player.
+
+**Important:** Changing the narrator in Generate does **not** automatically change the narrator already associated with a queued part. Check the Queue page before starting a long conversion.
+
+### Command-line converter
+
+The current studio backend is `scripts/epub_to_audiobook_v7_studio.py`. Run these commands from the repository root with your Python environment activated:
+
+```bash
+# Inspect EPUB reading-order section numbers; no TTS generation
+python scripts/epub_to_audiobook_v7_studio.py inspect books/novel.epub
+
+# Generate only EPUB sections 3 through 5, with a distinct export name
+python scripts/epub_to_audiobook_v7_studio.py convert books/novel.epub \
+  --chapters 3-5 --output-name novel_part_01
+
+# Use a different narrator WAV for a conversion
+python scripts/epub_to_audiobook_v7_studio.py convert books/novel.epub \
+  --chapters 6-10 --voice voices/my_narrator.wav --output-name novel_part_02
+
+# Resume existing speech-generation work (reuses compatible cached chunks)
+python scripts/epub_to_audiobook_v7_studio.py resume books/novel.epub \
+  --chapters 3-5 --output-name novel_part_01
+
+# Re-export already completed chapter WAVs without generating narration
+python scripts/epub_to_audiobook_v7_studio.py export books/novel.epub \
+  --chapters 3-5 --output-name novel_part_01
+```
+
+The backend also provides `index`, `audit`, `rebuild`, and `render-chunk` commands for production and editing workflows. Use `--help` for the argument list; the graphical editor is recommended for normal chunk repair.
+
+## Project layout
+
+```text
+AudiobookAI/
+├── scripts/
+│   ├── audiobook_gui_v2.py              # Current PySide6 GUI entry point
+│   ├── epub_to_audiobook_v7_studio.py    # Current EPUB -> WAV -> M4B backend
+│   ├── test_five_minutes_v7_smooth.py   # V7 narration engine
+│   ├── audiobookai_editor.py            # Chunk editor UI
+│   ├── audiobookai_production.py        # Audio quality, edits, cache helpers
+│   ├── audiobookai_voices.py            # Voice import and job snapshots
+│   ├── audiobookai_storage.py           # SQLite store and MySQL schema mirror
+│   ├── audiobookai_mysql_proxy.py       # Separate-process MySQL bridge
+│   ├── audiobookai_mysql_worker.py      # MySQL worker process
+│   └── ...                              # Older versions / helper modules
+├── sql/setup_mysql.sql                  # Optional MySQL database setup
+├── tests/                               # Automated tests
+├── README.md
+├── INSTALL.md
+├── books/                              # User-created; Git-ignored
+├── voices/                             # User-created; WAVs Git-ignored
+└── output/                             # User-created; Git-ignored
+```
+
+The following are **runtime directories**, not part of the GitHub source distribution:
+
+| Location | Purpose |
+| --- | --- |
+| `books/` | Your local EPUBs |
+| `voices/` | Your narrator WAVs and hidden voice snapshots |
+| `output/audiobooks/` | Chapter WAVs and finished M4B files |
+| `output/narration_cache_v2/` | Reusable raw speech WAVs |
+| `output/audiobookai_studio.sqlite3` | Local library, queue, and progress |
+| `~/.config/audiobookai/studio_config.json` | Non-secret MySQL configuration |
+
+The default narrator path is `voices/british_narrator.wav`. Other narrator WAVs can be imported through the GUI. Voice recordings and generated audiobooks are deliberately excluded from Git.
+
+## Narration and cache behavior
+
+The current V7 engine uses an approximately **18-word maximum chunk target**, a protective **350-token** generation cap, and baseline Chatterbox settings of **exaggeration 0.35** and **CFG 0.30**. These are implementation settings, not guarantees of pronunciation or seamless speech.
+
+The raw cache is keyed using the exact text and relevant voice identity. Compatible text may therefore reuse existing audio even when it appears in a different chapter or book. Reuse is deterministic caching—not retraining the model. Alternate narrators are kept separate from the default narrator's output paths.
+
+**Do not clear raw caches during an unfinished book.** Deleting them can force fresh GPU generation when resuming or rebuilding chapters. The Settings page offers a manual, confirmation-based cleanup tool when you're ready.
+
+## Tests
+
+From an activated environment with the application dependencies installed:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests cover storage migration, narrator isolation, queue selection, cache safeguards, audio rebuilding, and simulated generation recovery. **Passing tests does not prove GPU generation, MySQL connectivity, or Qt behavior is working on every machine.** A real end-to-end conversion should be tested after a fresh installation.
+
+## Requirements and compatibility
+
+- Linux desktop with Qt/PySide6 (developed on KDE Plasma / Wayland).
+- **Python 3.11** recommended for compatibility with the original Chatterbox setup.
+- FFmpeg and FFprobe installed and on `PATH`.
+- Chatterbox TTS, PyTorch, TorchAudio, PySide6, EbookLib, Beautiful Soup, lxml, NumPy, and SoundFile.
+- A suitable GPU is strongly recommended for long books. This project has been exercised with NVIDIA CUDA on a **4 GB GTX 1650**; AMD ROCm, CPU-only operation, Windows, and macOS are **not validated** by this repository.
+- MySQL is optional; it is **not** required for importing, converting, or playing audiobooks.
+
+Installation details: **[INSTALL.md](INSTALL.md)**. Chatterbox upstream: https://github.com/resemble-ai/chatterbox. PyTorch platform-specific installation selector: https://pytorch.org/get-started/locally/.
+
+## Copyright, voice rights, and privacy
+
+Use EPUBs you are authorized to access and convert, and narrator samples you have permission to use. **No books, third-party recordings, generated audiobooks, or model weights are included.** Do not commit runtime data or credentials to GitHub. The app runs locally, although dependencies/model weights may be downloaded from external services during setup and first use.
+
+This project is not affiliated with Resemble AI or the authors, publishers, and narrators of any books you choose to process. Respect relevant copyrights and voice/likeness rights, particularly before distributing generated recordings.
+
+## License and contributions
+
+**No project license is currently included in this repository.** Public visibility on GitHub does not, by itself, grant permission to reuse, modify, or redistribute this source. Add an explicit `LICENSE` before advertising the project as open-source or accepting redistribution-oriented contributions. Third-party dependencies retain their own licenses.
+
+Bug reports should include the OS, Python/PyTorch versions, GPU, relevant (redacted) logs, and a small reproducible test case. Never attach copyrighted EPUBs, narrator recordings, credentials, or full audiobook outputs to issues.
