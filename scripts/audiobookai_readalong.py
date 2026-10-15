@@ -8,11 +8,14 @@ Qt, GPU or generation work is needed.
 from __future__ import annotations
 
 from bisect import bisect_right
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import soundfile as sf
 
-from audiobookai_production import load_index, active_take, original_chunk_file
+from audiobookai_production import (load_index, active_take, original_chunk_file,
+                                    edit_digest)
 
 
 def read_chapter(folder: str | Path, chapter: int) -> dict:
@@ -44,16 +47,32 @@ def read_chapter(folder: str | Path, chapter: int) -> dict:
     if len(entries) > 50000:
         raise ValueError("Chapter index contains too many chunks.")
 
-    chunks = []
-    lengths = []
-    missing = 0
+    # An editor take can be selected before the assembled chapter is rebuilt.
+    # Its metadata and duration belong to the chapter only if the digest agrees.
+    original_texts = []
     for expected, entry in enumerate(entries, 1):
         if not isinstance(entry, dict) or not str(entry.get("text", "")).strip():
             raise ValueError(f"Invalid chunk entry #{expected}")
         if int(entry.get("number", -1)) != expected:
             raise ValueError(f"Chunk index is out of sequence at #{expected}")
-        text = str(entry["text"]).replace("\n", " ").strip()
-        chosen = active_take(folder, number, expected, text)
+        original_texts.append(str(entry["text"]))
+    chapter_record = {}
+    manifest_path = folder / "manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_record = manifest.get("chapters", {}).get(str(number), {})
+    recorded_digest = chapter_record.get("edits_digest") if isinstance(chapter_record, dict) else None
+    applied_edits = bool(recorded_digest and recorded_digest == edit_digest(
+        folder, number, [SimpleNamespace(text=text) for text in original_texts]))
+
+    chunks = []
+    lengths = []
+    missing = 0
+    for expected, entry in enumerate(entries, 1):
+        original_text = original_texts[expected - 1]
+        chosen = active_take(folder, number, expected, original_text) if applied_edits else None
+        text = str(chosen.get("text") or original_text) if chosen else original_text
+        text = text.replace("\n", " ").strip()
         recording = Path(chosen["path"]) if chosen else original_chunk_file(entry)
         try:
             if not recording.is_file():
@@ -105,3 +124,14 @@ def chunk_at(timeline: list[dict], position_ms: int) -> int:
         return -1
     starts = [int(chunk["start_ms"]) for chunk in timeline]
     return min(len(timeline) - 1, max(0, bisect_right(starts, int(position_ms)) - 1))
+
+def clamp_resume_ms(position_ms, duration_ms: int) -> int:
+    """Normalize saved UI position; a completed chapter resumes at its beginning."""
+    try:
+        duration = max(0, int(duration_ms))
+        position = max(0, int(position_ms))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if duration == 0 or position >= max(0, duration - 1000):
+        return 0
+    return min(position, duration)
