@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.6 preview**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.7**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -15,11 +15,12 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **Audio review and editing:** Inspect completed chapter audio, edit the spoken text for individual chunks, generate alternate takes, restore previous takes, and rebuild audio from saved recordings.
 - **M4B export:** Assemble completed chapter WAVs into AAC-encoded M4B files with chapter markers. Long books can be exported as separate parts.
 - **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
+- **V2.7 Read Along:** Play completed chapter WAVs with highlighted saved narration chunks, click a chunk to seek, and open its chapter in the existing audio editor, automatically refresh repaired chapters, and resume where you left off. Chunk timing is estimated rather than sample-accurate.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
 - **Optional MySQL mirror:** Synchronize library, chapter, and job metadata to a MySQL database for querying. SQLite remains the authoritative local store; audio itself stays on disk.
 - **Manual cache cleanup:** Preview cache age and storage usage before deleting raw cached WAVs. Completed exports and narrator files are excluded.
 
-**Not implemented yet:** a built-in EPUB read-along player with synchronized highlighting or one-click cross-platform installation.
+**Not implemented yet:** sample-accurate or word-level forced-aligned EPUB synchronization, and one-click cross-platform installation.
 
 ## Getting started
 
@@ -188,3 +189,28 @@ your audio if moving computers.
 This is a development preview: the Archive GUI should be tested on the target
 Linux machine before relying on it for valuable recordings. Ensure your external
 drive has enough free space and supports large files.
+
+### V2.7 Read Along
+
+Select **Read Along** in the sidebar, then a book, narrator, and completed
+chapter. Click **Play / pause** to listen to its assembled WAV. The matching
+saved narration chunk is highlighted, and clicking a text chunk seeks near its
+beginning. **Edit chapter** jumps into the existing non-destructive audio editor.
+After you close the editor, the reader reloads rebuilt chapter audio and the
+text of any replacement takes actually included in the saved chapter. The
+selected book, narrator, chapter and playback position are restored on restart.
+No Chatterbox or GPU generation is involved.
+
+**Precision and text caveat:** Existing V2.6 chunk indexes contain original
+chunk sequence and cache references but not exact sample offsets. Highlight
+boundaries are estimated from recorded speech-chunk durations and normalized to
+the assembled chapter WAV; they can drift around inserted pauses and edits. If
+raw chunk recordings were cleaned, timing is estimated using word counts. The
+reader displays the saved *spoken* chunk text, which may contain pronunciation
+dictionary substitutions rather than the EPUB's original text/formatting.
+The next step toward exact sync is to persist assembly sample offsets plus both
+original and synthesized text in future chapter indexes.
+
+QtMultimedia must be provided by the same PySide6 installation as the GUI.
+Use the existing virtual environment and confirm WAV playback on your Linux
+machine; this preview has not yet been validated across audio backends.
