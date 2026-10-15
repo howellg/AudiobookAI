@@ -88,6 +88,85 @@ class StoreTests(unittest.TestCase):
         self.assertGreater(len(changes),4)
         store.close()
 
+    def test_deleted_job_does_not_reuse_immutable_pronunciation_snapshot(self):
+        """Fix regression: deleted SQLite job #1 must not overwrite job_1.json."""
+        from audiobookai_pronunciation import snapshot_for_job
+        root = self.path.parent
+        snapshot_dir = root / 'pronunciation' / 'jobs'
+        snapshot_dir.mkdir(parents=True)
+        old_snapshot = snapshot_dir / 'job_1.json'
+        old_snapshot.write_text('{"version":1,"job_id":1,"rules":[]}',
+                                encoding='utf-8')
+        previous_bytes = old_snapshot.read_bytes()
+        book_path = root / 'novel.epub'
+        book_path.write_bytes(b'fixture')
+        dictionary = root / 'dictionary.json'
+        dictionary.write_text('{"version":1,"global":[],"books":{}}',
+                              encoding='utf-8')
+        store = Store(self.path)
+        try:
+            book_id = store.import_book(book_path, 'Novel', 'Writer',
+                                        [Section(1, 'Chapter', 'Some text')])
+            job = store.add_job(book_id, 'Remaining chapters', [1], 'part_02',
+                                pronunciation_required=True)
+            self.assertEqual(job, 2)
+            frozen = snapshot_for_job(job, book_path, dictionary, snapshot_dir)
+            self.assertTrue(frozen.is_file())
+            self.assertEqual(old_snapshot.read_bytes(), previous_bytes)
+            self.assertEqual(store.job(job)['status'], 'queued')
+            store.remove_job(job)
+            later = store.add_job(book_id, 'Another part', [1], 'part_03',
+                                  pronunciation_required=True)
+            self.assertEqual(later, 3)
+            self.assertEqual(old_snapshot.read_bytes(), previous_bytes)
+        finally:
+            store.close()
+        # Persisted sequence must not shrink after all jobs are deleted.
+        reopened = Store(self.path)
+        try:
+            latest = reopened.add_job(book_id, 'After restart', [1], 'part_04',
+                                      pronunciation_required=True)
+            self.assertEqual(latest, 4)
+        finally:
+            reopened.close()
+
+    def test_allocator_reserves_highest_historical_snapshot(self):
+        """Queue IDs must not collide with snapshots left by old or removed jobs."""
+        job_dir = self.path.parent / 'pronunciation' / 'jobs'
+        job_dir.mkdir(parents=True)
+        for name in ('job_1.json', 'job_87.json', 'job_not_a_number.json',
+                     'job_90.json.tmp'):
+            (job_dir / name).write_text('old snapshot', encoding='utf-8')
+        store = Store(self.path)
+        try:
+            book = store.import_book('/tmp/test_book.epub', 'Book', 'Author',
+                                     [Section(1, 'One', 'Text')])
+            new_id = store.add_job(book, 'A', [1], 'new_part',
+                                   pronunciation_required=True)
+            self.assertEqual(new_id, 88)
+            self.assertEqual((job_dir / 'job_87.json').read_text(), 'old snapshot')
+        finally:
+            store.close()
+
+    def test_allocator_preserves_ids_without_snapshot_files(self):
+        """Removing the final row must not reset the ID counter to 1."""
+        store = Store(self.path)
+        try:
+            book = store.import_book('/tmp/test_book.epub', 'Book', 'Author',
+                                     [Section(1, 'One', 'Text')])
+            first = store.add_job(book, 'A', [1], 'part1')
+            store.remove_job(first)
+            second = store.add_job(book, 'B', [1], 'part2')
+            self.assertGreater(second, first)
+            store.remove_job(second)
+        finally:
+            store.close()
+        reopened = Store(self.path)
+        try:
+            self.assertGreater(reopened.add_job(book, 'C', [1], 'part3'), second)
+        finally:
+            reopened.close()
+
     def test_backfill_existing_sections(self):
         """Verify backfill existing sections behavior."""
         store = Store(self.path)
