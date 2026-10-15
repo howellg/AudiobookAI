@@ -1,0 +1,51 @@
+# Python environments and generated files
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# AudiobookAI generated content
+output/
+books/
+backups/
+voices/*.wav
+*.epub
+*.m4b
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+config.local.json
+settings.local.json
+secrets.*
+*.pem
+*.key
+
+# IDE and system files
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.zip
+*.timer-backup
+*.bak
+*.orig
+audiobookai_v2_*/
+books/
+books/
+output/
+voices/*.wav
+.venv-chatterbox/
+backups/
+voices/.audiobookai_voice_snapshots/
+scripts/*_backup.py
+voices/.audiobookai_voice_snapshots/
+scripts/*_backup.py
