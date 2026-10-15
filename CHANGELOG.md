@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.0 (unreleased) — Archive Manager preview
+
+- New Archive page for narrator-specific completed editions.
+- Editable title, author, series, volume, narrator and optional artwork metadata.
+- Atomic M4B archival packaging with chapter markers and AAC stream copy.
+- Regenerate stale complete editions from existing chapter WAVs, never TTS.
+- Export to user-selected destinations, including mounted external drives.
+- EPUB2/EPUB3 cover lookup and six new regression tests with real FFmpeg.
+
+
 ## 2.5.0 — Pronunciation dictionary
 
 - Added global and EPUB-specific written-to-spoken text rules in a GUI page.
