@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.7**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8 preview**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -17,6 +17,7 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
 - **V2.7 Read Along:** Play completed chapter WAVs with highlighted saved narration chunks, click a chunk to seek, and open its chapter in the existing audio editor, automatically refresh repaired chapters, and resume where you left off. Chunk timing is estimated rather than sample-accurate.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
+- **V2.8 Reliability & Recovery (preview):** Safely requeue interrupted parts with dependency checks, keep per-job converter logs on disk, and make verified periodic backups of small project metadata.
 - **Optional MySQL mirror:** Synchronize library, chapter, and job metadata to a MySQL database for querying. SQLite remains the authoritative local store; audio itself stays on disk.
 - **Manual cache cleanup:** Preview cache age and storage usage before deleting raw cached WAVs. Completed exports and narrator files are excluded.
 
@@ -214,3 +215,31 @@ original and synthesized text in future chapter indexes.
 QtMultimedia must be provided by the same PySide6 installation as the GUI.
 Use the existing virtual environment and confirm WAV playback on your Linux
 machine; this preview has not yet been validated across audio backends.
+
+### V2.8 Reliability & Recovery preview
+
+The Queue page provides **Recover interrupted**, which checks interrupted jobs'
+EPUB, saved narrator WAV, section selection and frozen pronunciation snapshot
+before putting them back into the queue. Nothing starts automatically; click
+**Start queue** when ready. Failed jobs are not silently retried. The converter
+still resumes from compatible cached speech rather than restarting finished work.
+
+Each attempted conversion creates a bounded, timestamped log under
+`output/diagnostics/`. Select a queue part and click **View job log**. The
+failure reason is retained on the queue record, and logs are kept locally.
+
+Settings now offers **Backup metadata now**, **Verify latest backup**, and
+**Open backups folder**. An automatic backup runs on startup if stale and
+approximately every 30 minutes while the desktop app is open. The newest ten
+automatic archives are retained; manually requested archives are never pruned.
+Backups use SQLite's consistent backup API, include the pronunciation dictionary
+and immutable job snapshots plus the archive metadata catalog, and are SHA256
+verified before being committed to disk. No automatic restore or replacement
+of your live data is performed.
+
+**Important:** these metadata archives do **not** contain source EPUBs,
+narrator WAVs, finished M4Bs, chapter WAVs, raw generation caches, AI models,
+or private MySQL passwords. They are stored on the same disk by default, so
+copy the archives **and your separate media folders** to external storage
+to protect against drive failure. Restoring paths and snapshots onto a new
+machine may require adjusting paths; there is no one-click restore yet.
