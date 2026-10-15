@@ -1,5 +1,6 @@
 """Read Along regression tests: no Qt, GPU, Chatterbox, or generated speech."""
 import json
+from types import SimpleNamespace
 from pathlib import Path
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import audiobookai_readalong as reader
+import audiobookai_production as production
 
 
 class ReadAlongTests(unittest.TestCase):
@@ -80,6 +82,53 @@ class ReadAlongTests(unittest.TestCase):
         self.save_index()
         with self.assertRaises(ValueError):
             self.load()
+
+    def test_selected_take_is_not_shown_until_assembled_wav_contains_it(self):
+        """Saved active take may be unapplied until the editor rebuilds the WAV."""
+        edit_folder = self.folder / "chunk_edits"
+        replacement = edit_folder / "audio" / "0001" / "take1.wav"
+        replacement.parent.mkdir(parents=True)
+        sf.write(str(replacement), np.full(2 * 16000, 0.12), 16000)
+        edits = {
+            "version": 1,
+            "edits": {
+                "1": {
+                    "original_text": "Chapter sentence 1",
+                    "active": "take1",
+                    "takes": [{
+                        "id": "take1", "text": "Corrected name spoken here",
+                        "wav": str(replacement.relative_to(self.folder)),
+                    }],
+                },
+            },
+        }
+        production.atomic_json(edit_folder / "0001.json", edits)
+        digest = production.edit_digest(
+            self.folder, 1, [SimpleNamespace(text=e["text"]) for e in self.entries])
+        manifest_path = self.folder / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "chapters": {"1": {"edits_digest": "stale-digest"}}
+        }))
+        unrepaired = self.load()
+        self.assertEqual(unrepaired["chunks"][0]["text"], "Chapter sentence 1")
+        self.assertEqual(unrepaired["chunks"][1]["start_ms"], 1000)
+
+        manifest_path.write_text(json.dumps({
+            "chapters": {"1": {"edits_digest": digest}}
+        }))
+        rebuilt = self.load()
+        self.assertEqual(rebuilt["chunks"][0]["text"], "Corrected name spoken here")
+        self.assertEqual(rebuilt["chunks"][1]["start_ms"], 1714)
+
+    def test_resume_time_is_clamped_and_completed_chapter_resets(self):
+        """An obsolete or corrupted QSettings seek value cannot escape audio bounds."""
+        self.assertEqual(reader.clamp_resume_ms(2100, 6000), 2100)
+        self.assertEqual(reader.clamp_resume_ms(-500, 6000), 0)
+        self.assertEqual(reader.clamp_resume_ms(6000, 6000), 0)
+        self.assertEqual(reader.clamp_resume_ms(5600, 6000), 0)
+        self.assertEqual(reader.clamp_resume_ms("invalid", 6000), 0)
+        self.assertEqual(reader.clamp_resume_ms(None, 6000), 0)
+        self.assertEqual(reader.clamp_resume_ms(400, 0), 0)
 
 
 if __name__ == "__main__":
