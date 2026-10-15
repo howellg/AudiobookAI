@@ -1984,6 +1984,12 @@ class Studio(QMainWindow):
         # appendPlainText() causes internal Qt layout/scrollbar changes.
         """Append a converter message to the bounded log viewer."""
         self.logs.appendPlainText(str(text))
+        if self.active_job_log is not None:
+            try:
+                append_diagnostic(self.active_job_log, text)
+            except OSError:
+                # Diagnostics are best effort, never an interruption to narration.
+                self.active_job_log = None
 
     def focus_search(self):
         """Focus the search field belonging to the currently visible page."""
@@ -2536,6 +2542,9 @@ class Studio(QMainWindow):
                 self.error('Missing narrator WAV', f'The saved narrator for this part is missing: {voice}')
                 return
             arguments.extend(['--voice', str(voice)])
+        self.maybe_auto_metadata_backup()
+        self.active_job_log = job_log_path(self.diagnostic_dir, job_id)
+        self.diagnostic_lines.clear()
         self.proc = QProcess(self)
         self.proc.setProgram(sys.executable)
         self.proc.setArguments(arguments)
@@ -2595,6 +2604,7 @@ class Studio(QMainWindow):
                 continue
             if 'FutureWarning:' in line or 'sdpa' in line or 'self.gen = func' in line:
                 continue
+            self.diagnostic_lines.append(line)
             self.write_log(line)
 
     def progress_event(self, event):
@@ -2714,7 +2724,9 @@ class Studio(QMainWindow):
     def process_error(self, _error):
         """Record a Qt subprocess error message for diagnosis."""
         if self.proc is not None:
-            self.write_log(f'Process error: {self.proc.errorString()}')
+            message = f'Process error: {self.proc.errorString()}'
+            self.diagnostic_lines.append(message)
+            self.write_log(message)
 
     def process_finished(self, exit_code, exit_status):
         """Verify an export and transition the job to complete, interrupted, or failed."""
@@ -2722,6 +2734,7 @@ class Studio(QMainWindow):
             return
         self.consume_output()
         if self.buffer.strip():
+            self.diagnostic_lines.append(self.buffer.strip())
             self.write_log(self.buffer.strip())
         self.buffer = ''
         stopped = self.stop_requested or exit_code == 130
@@ -2747,10 +2760,15 @@ class Studio(QMainWindow):
             self.active_title.setText('Stopped — cached speech retained')
             self.write_log('Job interrupted. Retry this part to continue using cached speech.')
         else:
-            self.store.update_job(job_id, 'failed', error=f'Converter exited with code {exit_code}. Check log.')
+            hint = diagnostic_hint(self.diagnostic_lines, exit_code)
+            detail = hint + (f' · Log: {self.active_job_log}' if self.active_job_log else '')
+            self.store.update_job(job_id, 'failed', error=detail)
             self.active_title.setText('Generation failed — see log')
             self.write_log(f'Generation failed (exit code {exit_code}).')
             self.run_queue = False
+        self.write_log('Converter exited: ' + ('complete' if good else
+            'interrupted' if stopped else f'failed (code {exit_code})'))
+        self.active_job_log = None
         self.proc.deleteLater()
         self.proc = None
         self.active_job_id = None
