@@ -94,6 +94,7 @@ class Store:
         """Open SQLite, create missing tables and columns, and mark abandoned jobs interrupted."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         # Keep related books, sections, and jobs consistent across all upgrades.
@@ -114,6 +115,11 @@ class Store:
             output_path TEXT, error TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
+        -- Unlike SQLite INTEGER PRIMARY KEY, this durable high-water mark
+        -- survives removal of the last job (and restoration of older queues).
+        CREATE TABLE IF NOT EXISTS job_id_sequence (
+            name TEXT PRIMARY KEY, last_id INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS book_sections (
             book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
             section_index INTEGER NOT NULL,
@@ -194,14 +200,55 @@ class Store:
         self.changed()
 
     def add_job(self, book_id, name, indices, output_name, voice_path=None, pronunciation_required=False):
-        """Create a queued batch with selected indices and a fixed narrator path."""
-        new_id = self.db.execute('''INSERT INTO jobs(book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required)
-                                    VALUES(?,?,?,?,?,?,?,?,?)''',
-                                 (book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
-                                  str(voice_path) if voice_path else None,
-                                  1 if pronunciation_required else 0)).lastrowid
-        self.changed()
-        return new_id
+        """Reserve a never-reused ID before freezing this queued part's pronunciation.
+
+        Existing V2.5 snapshots are named job_<id>.json and are intentionally
+        retained when a queue row is deleted. SQLite INTEGER PRIMARY KEY alone
+        reuses the largest deleted ID, which would collide with that immutable
+        snapshot and prevent the user from queueing more chapters. Allocate
+        beyond active rows, all retained snapshots, and a durable high-water
+        mark, without changing or deleting any existing audio or rule files.
+        """
+        # Taking the write lock before reading max(id) avoids concurrent GUI
+        # instances allocating the same row ID. Store mutations are committed
+        # synchronously through changed() as in previous releases.
+        if not self.db.in_transaction:
+            self.db.execute('BEGIN IMMEDIATE')
+        try:
+            highest_db = self.db.execute('SELECT COALESCE(MAX(id), 0) FROM jobs').fetchone()[0]
+            sequence = self.db.execute(
+                "SELECT last_id FROM job_id_sequence WHERE name='jobs'").fetchone()
+            highest_recorded = int(sequence[0]) if sequence else 0
+
+            # The SQLite DB and pronunciation snapshots both live under output/.
+            # Read filenames only: snapshots are immutable, and their contents
+            # need not be parsed or rewritten to reserve their historical IDs.
+            snapshots = self.path.parent / 'pronunciation' / 'jobs'
+            highest_snapshot = 0
+            if snapshots.exists():
+                if not snapshots.is_dir():
+                    raise ValueError(f'Pronunciation snapshot directory is not a folder: {snapshots}')
+                with os.scandir(snapshots) as files:
+                    for item in files:
+                        filename = item.name
+                        if filename.startswith('job_') and filename.endswith('.json'):
+                            digits = filename[4:-5]
+                            if digits.isascii() and digits.isdecimal():
+                                highest_snapshot = max(highest_snapshot, int(digits))
+            new_id = max(highest_db, highest_recorded, highest_snapshot) + 1
+            self.db.execute('''INSERT INTO jobs(
+                id,book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                (new_id, book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
+                 str(voice_path) if voice_path else None,
+                 1 if pronunciation_required else 0))
+            self.db.execute('''INSERT INTO job_id_sequence(name,last_id) VALUES('jobs',?)
+                ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id''', (new_id,))
+            self.changed()
+            return new_id
+        except Exception:
+            self.db.rollback()
+            raise
 
     def set_job_voice(self, job_id, voice_path):
         """Change a narrator only before execution; reset stale progress counters."""
