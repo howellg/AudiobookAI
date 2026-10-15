@@ -28,7 +28,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, QSettings
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut, QPalette
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMessageBox, QFileDialog, QPlainTextEdit,
+    QHeaderView, QLabel, QMainWindow, QMessageBox, QFileDialog, QInputDialog, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QLineEdit, QScrollArea,
 )
@@ -41,6 +41,7 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
                                 import_voice, freeze_voice, voice_name)
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
+from audiobookai_fullbook import collect_export_groups, verify_export_group
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -158,6 +159,8 @@ class Studio(QMainWindow):
         self.last_output_path = None
         self.exporting = False
         self.review_manifest = {}
+        self.full_export_proc = None
+        self.full_export_target = None
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -586,6 +589,8 @@ class Studio(QMainWindow):
         export_actions = QHBoxLayout()
         export_actions.addWidget(mk_button('▶ Play selected M4B', self.play_selected_export))
         export_actions.addWidget(mk_button('Open M4B folder', self.open_selected_export_folder))
+        export_actions.addWidget(mk_button('Export complete M4B', self.export_complete_book,
+            'Combine all finished part WAVs for one narrator into a single chaptered M4B; no GPU required'))
         export_actions.addStretch()
         l.addLayout(export_actions)
         note = QLabel('Narration preset: V7 Smooth — 18-word ceiling, 350-token cap, exaggeration 0.35. Narrators have isolated chapter audio and cached speech.')
@@ -1583,6 +1588,7 @@ class Studio(QMainWindow):
         book = self.store.book(book_id)
         if not book:
             return
+        manifest_paths = []
         try:
             self.converter = self.converter or load_converter()
             folder = self.converter.book_folder(Path(book['path']))
@@ -1608,14 +1614,159 @@ class Studio(QMainWindow):
                 self.review_table.setItem(r, c, item(value, str(wav) if c == 0 else None))
         jobs = [job for job in self.store.jobs() if job['book_id'] == book_id
                 and job['output_path']]
-        self.export_table.setRowCount(len(jobs))
-        for r, job in enumerate(jobs):
-            path = Path(job['output_path'])
+        exports = [(job['name'], Path(job['output_path'])) for job in jobs]
+        known = {str(path.resolve()) for _label, path in exports}
+        # Complete exports are archival files, not queue jobs. Discover them
+        # in the same narrator-specific directories as their original parts.
+        for manifest_path in manifest_paths:
+            if manifest_path.is_file():
+                for path in sorted(manifest_path.parent.glob('*_COMPLETE.m4b')):
+                    if str(path.resolve()) not in known:
+                        exports.append(('Complete audiobook · ' + path.stem, path))
+                        known.add(str(path.resolve()))
+        self.export_table.setRowCount(len(exports))
+        for r, (label, path) in enumerate(exports):
             exists = path.is_file()
-            details = (job['name'], 'Ready' if exists else 'Missing',
+            details = (label, 'Ready' if exists else 'Missing',
                        fmt_size(path.stat().st_size) if exists else '—')
             for c, value in enumerate(details):
                 self.export_table.setItem(r, c, item(value, str(path) if c == 0 else None))
+
+    def export_complete_book(self):
+        """Create a single archival M4B from finished queue parts, without TTS.
+
+        All parts must be complete, and every section must have an assembled
+        chapter WAV. The narrator grouping uses the converter's actual output
+        path, so WAVs from different speakers cannot be mixed accidentally.
+        The export runs in its own process to keep Qt responsive.
+        """
+        if self.proc is not None or self.run_queue or self.full_export_proc is not None:
+            QMessageBox.information(self, 'Export unavailable',
+                'Finish or pause the active conversion/export before making a complete book.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible() and editor.proc is not None:
+            QMessageBox.information(self, 'Audio editor busy',
+                'Finish rebuilding audio in the editor before exporting a complete book.')
+            return
+        book_id = self.review_selected_book_id()
+        if book_id is None:
+            QMessageBox.information(self, 'Choose a book', 'Select a book in Review audio first.')
+            return
+        book = self.store.book(book_id)
+        if not book:
+            return
+        epub = Path(book['path'])
+        if not epub.is_file():
+            self.error('EPUB unavailable', f'The source EPUB no longer exists: {epub}')
+            return
+        try:
+            conv = self.converter or load_converter()
+            self.converter = conv
+            # Each job keeps its original narrator snapshot. Resolve folders
+            # with that path instead of the currently selected Generate voice.
+            groups = collect_export_groups(self.store.jobs(), book_id, conv.book_folder)
+            if not groups:
+                raise ValueError('No queue parts exist for this book.')
+            if len(groups) > 1:
+                choices = [f"{voice_name(g['voice_path'])} — "
+                           f"{len(g['parts'])} part(s), {len(g['indices'])} sections, "
+                           f"{len(g['unfinished'])} unfinished" for g in groups]
+                selected, accepted = QInputDialog.getItem(
+                    self, 'Choose narrator', 'Combine parts recorded with:', choices, 0, False)
+                if not accepted:
+                    return
+                group = groups[choices.index(selected)]
+            else:
+                group = groups[0]
+            indices = verify_export_group(group, int(book['sections']))
+            # Reuse the converter's filename sanitization; put the final book
+            # alongside its existing parts in the narrator-specific folder.
+            output_name = conv.safe_name(book['title'], 100) + '_COMPLETE'
+            output = group['folder'] / (output_name + '.m4b')
+            excluded = int(book['sections']) - len(indices)
+            overwrite = '\nAn existing complete M4B will be replaced after verification.' if output.exists() else ''
+            prompt = (f"Combine {len(group['parts'])} finished part(s) into one M4B?\n\n"
+                      f"Narrator: {voice_name(group['voice_path'])}\n"
+                      f"Chapters: {len(indices)} (EPUB sections {indices[0]}–{indices[-1]})\n"
+                      f"Unselected EPUB sections: {excluded}\n"
+                      f"Encoding: AAC 64 kbps mono, with chapter markers\n\n"
+                      f"Output: {output}\n\n"
+                      'All chapter WAVs and individual part M4Bs will remain unchanged.' + overwrite)
+            if QMessageBox.question(self, 'Export complete audiobook', prompt,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+        except Exception as exc:
+            self.error('Cannot export complete audiobook', exc)
+            return
+
+        arguments = ['-u', str(CONVERTER_FILE), 'export', str(epub),
+                     '--chapters', ','.join(map(str, indices)),
+                     '--output-name', output_name]
+        if group['voice_path']:
+            arguments += ['--voice', str(group['voice_path'])]
+        self.full_export_target = output
+        self.full_export_proc = QProcess(self)
+        proc = self.full_export_proc
+        proc.setProgram(sys.executable)
+        proc.setArguments(arguments)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self.read_complete_export_output)
+        proc.finished.connect(self.complete_export_finished)
+        proc.errorOccurred.connect(self.complete_export_error)
+        self.statusBar().showMessage(f'Encoding complete audiobook: {output.name}')
+        self.write_log(f'Complete audiobook export started: {output}')
+        proc.start()
+
+
+    def read_complete_export_output(self):
+        """Capture short FFmpeg/converter output without refreshing Qt tables."""
+        if self.full_export_proc is not None:
+            message = bytes(self.full_export_proc.readAllStandardOutput()).decode('utf-8', errors='replace')
+            if message.strip():
+                self.write_log(message.rstrip())
+
+
+    def complete_export_error(self, error):
+        """Report process errors, including a child that never started."""
+        proc = self.full_export_proc
+        if proc is None:
+            return
+        self.statusBar().showMessage('Complete M4B export encountered a process error')
+        self.write_log('Complete export process error: ' + proc.errorString())
+        if error == QProcess.FailedToStart:
+            # Qt does not guarantee a finished signal when a process fails to
+            # launch, so release it here rather than leaving export blocked.
+            self.full_export_proc = None
+            self.full_export_target = None
+            proc.deleteLater()
+
+
+    def complete_export_finished(self, exit_code, exit_status):
+        """Release the background exporter and display the new archival M4B."""
+        proc = self.full_export_proc
+        if proc is None:
+            return
+        self.read_complete_export_output()
+        target = self.full_export_target
+        good = (exit_code == 0 and exit_status == QProcess.NormalExit
+                and target is not None and target.is_file())
+        if good:
+            self.statusBar().showMessage(f'Complete audiobook ready: {target}')
+            self.write_log(f'Complete M4B saved: {target}')
+        else:
+            self.statusBar().showMessage('Complete audiobook export failed; original parts were preserved')
+            self.write_log(f'Complete M4B export failed (exit code {exit_code}); see logs in Queue.')
+            QMessageBox.warning(self, 'Complete export failed',
+                'The complete audiobook could not be exported.\n'
+                'Your chapter WAVs and existing M4B parts are unchanged.\n'
+                'Open Queue to inspect the converter log.')
+        self.full_export_proc = None
+        self.full_export_target = None
+        proc.deleteLater()
+        self.refresh_review()
+
 
     def selected_export_path(self):
         """Return the export path selected in the review table."""
@@ -1773,6 +1924,11 @@ class Studio(QMainWindow):
         if editor is not None and editor.isVisible() and editor.proc is not None:
             QMessageBox.information(self, 'Audio editor busy',
                 'Finish the chunk editing operation before closing AudiobookAI.')
+            event.ignore()
+            return
+        if self.full_export_proc is not None:
+            QMessageBox.information(self, 'Complete audiobook export in progress',
+                'Finish exporting the complete M4B before closing AudiobookAI.')
             event.ignore()
             return
         if self.proc is not None:
