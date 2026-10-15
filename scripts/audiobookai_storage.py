@@ -235,6 +235,25 @@ class Store:
                         (status, output_path, error, now() if status == 'complete' else None, now(), job_id))
         self.changed()
 
+    def requeue_interrupted(self, job_ids):
+        """Requeue approved interrupted jobs only; retain progress and cached audio.
+
+        This deliberately excludes failed, complete and already-running jobs.
+        The GUI checks source files and pronunciation snapshots first.
+        """
+        ids = sorted({int(job_id) for job_id in job_ids})
+        if not ids:
+            return 0
+        placeholders = ','.join('?' for _ in ids)
+        cursor = self.db.execute(
+            f"UPDATE jobs SET status='queued', error='', updated=? "
+            f"WHERE status='interrupted' AND id IN ({placeholders})",
+            (now(), *ids))
+        count = cursor.rowcount
+        if count:
+            self.changed()
+        return count
+
     def update_progress(self, job_id, total_chunks, completed_chunks,
                         current_section=None, current_chunk=0, current_total=0):
         """Store a checkpoint of chapter and overall chunk progress."""

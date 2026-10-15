@@ -44,6 +44,10 @@ from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
+from audiobookai_reliability import (
+    append_diagnostic, check_resume_job, create_metadata_backup,
+    diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
+)
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
 from audiobookai_pronunciation import (
     scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
@@ -132,7 +136,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.7 · Read Along')
+        self.setWindowTitle('AudiobookAI Studio — V2.8 · Reliability')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -171,6 +175,10 @@ class Studio(QMainWindow):
         self.archive_proc = None
         self.archive_output = None
         self.archive_groups = []
+        self.active_job_log = None
+        self.diagnostic_lines = deque(maxlen=40)
+        self.backup_dir = ROOT / 'output' / 'metadata_backups'
+        self.diagnostic_dir = ROOT / 'output' / 'diagnostics'
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -185,7 +193,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.7 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.8 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -254,6 +262,10 @@ class Studio(QMainWindow):
         self.reconnect_timer.timeout.connect(self.maybe_sync_mysql)
         self.reconnect_timer.start(60000)
         QTimer.singleShot(500, self.connect_saved_mysql)
+        self.backup_timer = QTimer(self)
+        self.backup_timer.timeout.connect(self.maybe_auto_metadata_backup)
+        self.backup_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(3500, self.maybe_auto_metadata_backup)
 
     def page_base(self, heading, intro, scroll=False):
         """Create a page header and layout, optionally using a scrolling container."""
@@ -513,6 +525,8 @@ class Studio(QMainWindow):
             'Finish the active M4B part without starting the next one'))
         bar.addWidget(mk_button('■ Stop safely', self.stop_job))
         bar.addWidget(mk_button('↻ Retry selected', self.retry_selected))
+        bar.addWidget(mk_button('Recover interrupted', self.recover_interrupted,
+            'Requeue interrupted parts only when their source files and snapshots still exist'))
         bar.addWidget(mk_button('Remove selected', self.remove_selected_job))
         bar.addStretch()
         l.addLayout(bar)
@@ -523,6 +537,7 @@ class Studio(QMainWindow):
             'Play the selected completed M4B in your default audiobook player'))
         additional.addWidget(mk_button('Open folder', self.open_selected_output_folder))
         additional.addWidget(mk_button('Copy path', self.copy_selected_output_path))
+        additional.addWidget(mk_button('View job log', self.open_selected_diagnostic))
         additional.addStretch()
         l.addLayout(additional)
         filters = QHBoxLayout()
@@ -1802,6 +1817,25 @@ class Studio(QMainWindow):
         note.setObjectName('muted')
         note.setWordWrap(True)
         l.addWidget(note)
+
+        l.addWidget(title_label('Metadata backups · V2.8', 14))
+        self.backup_status = QLabel('Automatic metadata backups run every 30 minutes and '
+            'retain the newest 10. Copies are initially saved on this same disk.')
+        self.backup_status.setWordWrap(True)
+        self.backup_status.setObjectName('muted')
+        l.addWidget(self.backup_status)
+        backup_buttons = QHBoxLayout()
+        backup_buttons.addWidget(mk_button('Backup metadata now', self.backup_metadata_now))
+        backup_buttons.addWidget(mk_button('Verify latest backup', self.verify_latest_metadata_backup))
+        backup_buttons.addWidget(mk_button('Open backups folder', self.open_metadata_backup_folder))
+        backup_buttons.addStretch()
+        l.addLayout(backup_buttons)
+        backup_tip = QLabel('Metadata-only: SQLite queue, pronunciation rules/snapshots, '
+            'archive catalog and nonsecret configuration. EPUBs, voices, M4Bs, '
+            'chapter WAVs and raw caches must be backed up separately.')
+        backup_tip.setWordWrap(True)
+        backup_tip.setObjectName('muted')
+        l.addWidget(backup_tip)
         l.addStretch()
 
     def mark_mysql_dirty(self):
@@ -1950,6 +1984,12 @@ class Studio(QMainWindow):
         # appendPlainText() causes internal Qt layout/scrollbar changes.
         """Append a converter message to the bounded log viewer."""
         self.logs.appendPlainText(str(text))
+        if self.active_job_log is not None:
+            try:
+                append_diagnostic(self.active_job_log, text)
+            except OSError:
+                # Diagnostics are best effort, never an interruption to narration.
+                self.active_job_log = None
 
     def focus_search(self):
         """Focus the search field belonging to the currently visible page."""
@@ -2324,6 +2364,97 @@ class Studio(QMainWindow):
         first = self.job_table.item(r, 0) if r >= 0 else None
         return first.data(Qt.UserRole) if first else None
 
+    def recover_interrupted(self):
+        """Requeue interrupted parts after non-destructive dependency checks."""
+        if self.proc is not None:
+            QMessageBox.information(self, 'Queue busy',
+                                    'Stop the active conversion before recovering interrupted jobs.')
+            return
+        items = [j for j in self.store.jobs() if j['status'] == 'interrupted']
+        if not items:
+            QMessageBox.information(self, 'No interrupted parts', 'The queue has nothing to recover.')
+            return
+        ready, blocked = [], []
+        for job in items:
+            problem = check_resume_job(job)
+            if problem:
+                blocked.append(f"#{job['id']}: {problem}")
+            else:
+                ready.append(job['id'])
+        if not ready:
+            QMessageBox.warning(self, 'Recovery blocked',
+                'No interrupted parts passed preflight:\n' + '\n'.join(blocked[:12]))
+            return
+        message = (f'Requeue {len(ready)} interrupted part(s)?\n'
+                   'Cached narration and existing WAVs will be preserved. '
+                   'The queue will NOT start automatically.')
+        if blocked:
+            message += '\n\nSkipped:\n' + '\n'.join(blocked[:10])
+        if QMessageBox.question(self, 'Recover interrupted parts', message,
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        count = self.store.requeue_interrupted(ready)
+        self.refresh_jobs()
+        self.write_log(f'Recovery: {count} interrupted part(s) requeued; {len(blocked)} skipped.')
+        self.statusBar().showMessage(f'{count} parts ready. Click Start queue when ready.')
+
+    def open_selected_diagnostic(self):
+        """Open the last bounded diagnostic log associated with one queue job."""
+        job_id = self.selected_job_id()
+        if job_id is None:
+            return
+        files = list(self.diagnostic_dir.glob(f'job_{int(job_id)}_*.log'))
+        if not files:
+            QMessageBox.information(self, 'No diagnostic log',
+                                    'No V2.8 diagnostic log has been saved for this part.')
+            return
+        latest = max(files, key=lambda p: p.stat().st_mtime)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(latest.resolve())))
+
+    def maybe_auto_metadata_backup(self):
+        """Save an incremental-time checkpoint; never block narration if it fails."""
+        try:
+            recent = latest_backup(self.backup_dir, automatic_only=True)
+            if recent and time.time() - recent.stat().st_mtime < 30 * 60:
+                return
+            path = create_metadata_backup(
+                self.store.db, ROOT / 'output', self.backup_dir,
+                read_config(), automatic=True, keep=10)
+            self.write_log(f'Automatic metadata backup verified: {path.name}')
+            self.backup_status.setText(f'Latest automatic backup: {path.name}')
+        except Exception as exc:
+            self.write_log(f'Metadata backup failed (narration unaffected): {exc}')
+            self.backup_status.setText(f'Backup error: {exc}')
+
+    def backup_metadata_now(self):
+        """Manually save a metadata backup excluded from automatic pruning."""
+        try:
+            path = create_metadata_backup(
+                self.store.db, ROOT / 'output', self.backup_dir,
+                read_config(), automatic=False)
+            self.backup_status.setText(f'Manual backup verified: {path.name}')
+            self.statusBar().showMessage(f'Metadata backup saved: {path}')
+        except Exception as exc:
+            self.error('Metadata backup failed', exc)
+
+    def verify_latest_metadata_backup(self):
+        """Verify every SHA256 member checksum; do not extract to live files."""
+        path = latest_backup(self.backup_dir)
+        if path is None:
+            QMessageBox.information(self, 'No backups', 'Create a metadata backup first.')
+            return
+        try:
+            manifest = verify_metadata_backup(path)
+            self.backup_status.setText(
+                f'Verified {path.name}: {len(manifest["sha256"])} metadata files')
+        except Exception as exc:
+            self.error('Backup verification failed', exc)
+
+    def open_metadata_backup_folder(self):
+        """Open local metadata archives for external-drive copying."""
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_dir.resolve())))
+
     def start_queue(self):
         """Start the next pending job unless paused or already generating."""
         if self.proc is not None:
@@ -2411,6 +2542,9 @@ class Studio(QMainWindow):
                 self.error('Missing narrator WAV', f'The saved narrator for this part is missing: {voice}')
                 return
             arguments.extend(['--voice', str(voice)])
+        self.maybe_auto_metadata_backup()
+        self.active_job_log = job_log_path(self.diagnostic_dir, job_id)
+        self.diagnostic_lines.clear()
         self.proc = QProcess(self)
         self.proc.setProgram(sys.executable)
         self.proc.setArguments(arguments)
@@ -2470,6 +2604,7 @@ class Studio(QMainWindow):
                 continue
             if 'FutureWarning:' in line or 'sdpa' in line or 'self.gen = func' in line:
                 continue
+            self.diagnostic_lines.append(line)
             self.write_log(line)
 
     def progress_event(self, event):
@@ -2586,10 +2721,28 @@ class Studio(QMainWindow):
         if ask == QMessageBox.Yes and self.proc is not None:
             self.proc.kill()
 
-    def process_error(self, _error):
-        """Record a Qt subprocess error message for diagnosis."""
-        if self.proc is not None:
-            self.write_log(f'Process error: {self.proc.errorString()}')
+    def process_error(self, error):
+        """Persist converter launch failures instead of leaving a phantom running job."""
+        if self.proc is None:
+            return
+        message = f'Process error: {self.proc.errorString()}'
+        self.diagnostic_lines.append(message)
+        self.write_log(message)
+        if error == QProcess.FailedToStart:
+            job_id = self.active_job_id
+            if job_id is not None:
+                self.store.update_job(job_id, 'failed',
+                    error=f'Converter could not start: {message}' +
+                          (f' · Log: {self.active_job_log}' if self.active_job_log else ''))
+            failed_process = self.proc
+            self.proc = None
+            self.active_job_log = None
+            self.active_job_id = None
+            self.run_queue = False
+            failed_process.deleteLater()
+            self.active_title.setText('Converter failed to start — see log')
+            self.refresh_jobs()
+            self.statusBar().showMessage('Converter could not start; queue paused.')
 
     def process_finished(self, exit_code, exit_status):
         """Verify an export and transition the job to complete, interrupted, or failed."""
@@ -2597,6 +2750,7 @@ class Studio(QMainWindow):
             return
         self.consume_output()
         if self.buffer.strip():
+            self.diagnostic_lines.append(self.buffer.strip())
             self.write_log(self.buffer.strip())
         self.buffer = ''
         stopped = self.stop_requested or exit_code == 130
@@ -2622,10 +2776,15 @@ class Studio(QMainWindow):
             self.active_title.setText('Stopped — cached speech retained')
             self.write_log('Job interrupted. Retry this part to continue using cached speech.')
         else:
-            self.store.update_job(job_id, 'failed', error=f'Converter exited with code {exit_code}. Check log.')
+            hint = diagnostic_hint(self.diagnostic_lines, exit_code)
+            detail = hint + (f' · Log: {self.active_job_log}' if self.active_job_log else '')
+            self.store.update_job(job_id, 'failed', error=detail)
             self.active_title.setText('Generation failed — see log')
             self.write_log(f'Generation failed (exit code {exit_code}).')
             self.run_queue = False
+        self.write_log('Converter exited: ' + ('complete' if good else
+            'interrupted' if stopped else f'failed (code {exit_code})'))
+        self.active_job_log = None
         self.proc.deleteLater()
         self.proc = None
         self.active_job_id = None
