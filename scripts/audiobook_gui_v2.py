@@ -42,6 +42,7 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
+from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -180,7 +181,7 @@ class Studio(QMainWindow):
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -205,6 +206,7 @@ class Studio(QMainWindow):
         self.make_queue_page()
         self.make_review_page()
         self.make_settings_page()
+        self.make_quality_page()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -272,6 +274,8 @@ class Studio(QMainWindow):
             self.refresh_review()
         if index == 4:
             self.refresh_settings()
+        if index == 5 and self.quality_proc is None:
+            self.quality_book_changed()
 
     def make_library_page(self):
         """Build the imported-books table and library actions."""
@@ -597,6 +601,326 @@ class Studio(QMainWindow):
         note.setWordWrap(True)
         note.setObjectName('muted')
         l.addWidget(note)
+
+    def make_quality_page(self):
+        """Create the read-only QC dashboard for existing chapter and chunk WAVs.
+
+        The worker uses a separate Python process, keeping intensive WAV reads
+        outside the Qt main thread and away from Chatterbox GPU allocations.
+        """
+        l = self.page_base('Quality Control',
+            'Scan finished narration for missing audio, damaged WAVs, clipping, suspicious silence and short speech. '
+            'The scan does not modify recordings or rerun the TTS model.')
+        book_line = QHBoxLayout()
+        book_line.addWidget(QLabel('Book:'))
+        self.quality_book = QComboBox()
+        self.quality_book.currentIndexChanged.connect(self.quality_book_changed)
+        book_line.addWidget(self.quality_book, 2)
+        book_line.addWidget(QLabel('Narrator:'))
+        self.quality_narrator = QComboBox()
+        self.quality_narrator.currentIndexChanged.connect(self.quality_load_report)
+        book_line.addWidget(self.quality_narrator, 2)
+        l.addLayout(book_line)
+        self.quality_groups = []
+        self.quality_proc = None
+        self.quality_buffer = ''
+        self.quality_target = None
+        self.quality_report = None
+        self.quality_visible_issues = []
+        bar = QHBoxLayout()
+        self.quality_deep = QCheckBox('Inspect available individual speech chunks (slower)')
+        self.quality_deep.setToolTip('Checks the original/edited WAVs if they are still available. '
+            'Removed raw caches are not treated as damaged finished narration.')
+        bar.addWidget(self.quality_deep)
+        bar.addStretch()
+        self.quality_scan_button = mk_button('Scan audio', self.scan_quality)
+        self.quality_stop_button = mk_button('Stop scan', self.stop_quality)
+        self.quality_stop_button.setEnabled(False)
+        bar.addWidget(self.quality_scan_button)
+        bar.addWidget(self.quality_stop_button)
+        l.addLayout(bar)
+        self.quality_progress = QProgressBar()
+        self.quality_progress.setRange(0, 100)
+        self.quality_progress.setValue(0)
+        l.addWidget(self.quality_progress)
+        self.quality_status = QLabel('Select a completed book and narrator to scan its chapter WAVs.')
+        self.quality_status.setWordWrap(True)
+        l.addWidget(self.quality_status)
+        results_bar = QHBoxLayout()
+        results_bar.addWidget(title_label('Flagged audio', 14))
+        results_bar.addStretch()
+        results_bar.addWidget(QLabel('Show:'))
+        self.quality_filter = QComboBox()
+        self.quality_filter.addItems(['All issues', 'Errors only', 'Warnings only'])
+        self.quality_filter.currentIndexChanged.connect(self.quality_show_issues)
+        results_bar.addWidget(self.quality_filter)
+        l.addLayout(results_bar)
+        self.quality_table = QTableWidget(0, 5)
+        self.quality_table.setHorizontalHeaderLabels(['Severity', 'EPUB #', 'Chunk', 'Issue', 'Time'])
+        self.setup_table(self.quality_table)
+        self.quality_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        l.addWidget(self.quality_table, 1)
+        commands = QHBoxLayout()
+        commands.addWidget(mk_button('Review selected chapter…', self.quality_open_editor))
+        commands.addWidget(mk_button('Play flagged WAV', self.quality_play_audio))
+        commands.addWidget(mk_button('Open report folder', self.quality_open_folder))
+        commands.addStretch()
+        l.addLayout(commands)
+        note = QLabel('Warnings require listening, not automatic rejection. The chapter WAV is authoritative; '
+            'raw speech caches may be safely deleted after a chapter is assembled. '
+            'A fresh report is also summarized before complete-book export.')
+        note.setWordWrap(True)
+        note.setObjectName('muted')
+        l.addWidget(note)
+
+    def quality_refresh_books(self):
+        """Mirror library selections without disturbing Generate/Review pickers."""
+        selected = self.quality_book.currentData()
+        self.quality_book.blockSignals(True)
+        self.quality_book.clear()
+        for book in self.store.books():
+            self.quality_book.addItem(f"{book['title']} — {book['author']}", book['id'])
+        position = self.quality_book.findData(selected if selected is not None else self.current_book_id)
+        if position >= 0:
+            self.quality_book.setCurrentIndex(position)
+        self.quality_book.blockSignals(False)
+        self.quality_book_changed()
+
+    def quality_book_changed(self, *_):
+        """Group a book's queue parts by exact narrator folder, not display name."""
+        self.quality_narrator.blockSignals(True)
+        self.quality_narrator.clear()
+        self.quality_groups = []
+        book_id = self.quality_book.currentData()
+        if book_id is not None:
+            try:
+                self.converter = self.converter or load_converter()
+                self.quality_groups = collect_export_groups(
+                    self.store.jobs(), book_id, self.converter.book_folder)
+                for n, group in enumerate(self.quality_groups):
+                    self.quality_narrator.addItem(
+                        f"{voice_name(group['voice_path'])} · {len(group['parts'])} part(s)", n)
+            except Exception as exc:
+                self.quality_status.setText(f'Cannot locate narrator audio: {exc}')
+        self.quality_narrator.blockSignals(False)
+        self.quality_load_report()
+
+    def quality_selected_group(self):
+        """Return the selected narrator's finished/unfinished queue group."""
+        n = self.quality_narrator.currentData()
+        return self.quality_groups[n] if isinstance(n, int) and 0 <= n < len(self.quality_groups) else None
+
+    def quality_load_report(self, *_):
+        """Display the previous scan when navigating back to Quality Control."""
+        group = self.quality_selected_group()
+        self.quality_report = None
+        self.quality_progress.setValue(0)
+        if not group:
+            self.quality_status.setText('No queued audiobook parts were found for this book.')
+            self.quality_show_issues()
+            return
+        path = group['folder'] / 'quality_reports' / 'summary.json'
+        if path.is_file():
+            try:
+                self.quality_report = json.loads(path.read_text(encoding='utf-8'))
+                r = self.quality_report
+                m = r.get('metrics', {})
+                self.quality_status.setText(
+                    f"Last scan: {m.get('chapters_scanned', 0)} chapters, "
+                    f"{m.get('chunks_scanned', 0)} chunks; "
+                    f"{r.get('errors', 0)} errors, {r.get('warnings', 0)} warnings. "
+                    f"{m.get('raw_chunks_unavailable', 0)} raw cache chunks unavailable (not errors).")
+                self.quality_progress.setValue(100)
+            except (ValueError, OSError, TypeError):
+                self.quality_status.setText('Saved scan report is unreadable. Run a fresh scan.')
+        else:
+            self.quality_status.setText('No QC scan yet. Scan chapters first; select deep scan to check saved chunks.')
+        self.quality_show_issues()
+
+    def quality_show_issues(self, *_):
+        """Render report issues in one Qt table refresh, not on each WAV read."""
+        all_issues = (self.quality_report or {}).get('issues', [])
+        selected = self.quality_filter.currentIndex()
+        wanted = 'error' if selected == 1 else 'warning' if selected == 2 else None
+        self.quality_visible_issues = [x for x in all_issues if wanted is None or x.get('severity') == wanted][:1000]
+        self.quality_table.setRowCount(len(self.quality_visible_issues))
+        for r, entry in enumerate(self.quality_visible_issues):
+            value = (entry.get('severity', '').upper(), str(entry.get('chapter', '')),
+                     str(entry.get('chunk') or '—'), entry.get('message', ''),
+                     fmt_seconds(entry['seconds']) if entry.get('seconds') is not None else '—')
+            for col, val in enumerate(value):
+                cell = self.quality_table.item(r, col)
+                if cell is None:
+                    self.quality_table.setItem(r, col, item(val))
+                elif cell.text() != val:
+                    cell.setText(val)
+        if len(all_issues) > 1000:
+            self.quality_status.setText(self.quality_status.text() + ' Showing first 1,000 issues.')
+
+    def scan_quality(self):
+        """Start a separate read-only process; never scan large WAVs inside Qt."""
+        if self.quality_proc is not None:
+            return
+        if self.proc is not None or self.full_export_proc is not None:
+            QMessageBox.information(self, 'Audio is busy',
+                'Finish the current conversion or complete-book export before scanning.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible() and editor.proc is not None:
+            QMessageBox.information(self, 'Audio editor busy', 'Finish editing before scanning.')
+            return
+        group = self.quality_selected_group()
+        if not group:
+            QMessageBox.information(self, 'No audiobook parts', 'Choose a book with queued parts first.')
+            return
+        required = set()
+        for job in group['parts']:
+            if job['status'] == 'complete':
+                required.update(json.loads(job['indices']))
+        # A part in progress may already have assembled chapters. We scan them,
+        # but do not flag yet-to-be-generated chapters as missing.
+        present = set()
+        manifest_path = group['folder'] / 'manifest.json'
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                for key in manifest.get('chapters', {}):
+                    if str(key).isdecimal() and (group['folder'] / 'chapters' / f'{int(key):04d}.wav').is_file():
+                        present.add(int(key))
+            except (ValueError, OSError, TypeError):
+                pass
+        chapters = sorted(required | present)
+        if not chapters:
+            QMessageBox.information(self, 'No chapter WAVs yet',
+                'Generate at least one chapter before running a quality scan.')
+            return
+        self.quality_target = group['folder']
+        self.quality_buffer = ''
+        self.quality_proc = QProcess(self)
+        proc = self.quality_proc
+        proc.setProgram(sys.executable)
+        args = ['-u', str(SCRIPTS / 'audiobookai_quality.py'),
+                '--folder', str(group['folder']),
+                '--chapters', ','.join(map(str, chapters)),
+                '--required', ','.join(map(str, sorted(required)))]
+        if self.quality_deep.isChecked():
+            args.append('--deep')
+        proc.setArguments(args)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self.quality_process_output)
+        proc.finished.connect(self.quality_finished)
+        proc.errorOccurred.connect(self.quality_process_error)
+        self.quality_scan_button.setEnabled(False)
+        self.quality_stop_button.setEnabled(True)
+        self.quality_progress.setValue(0)
+        self.quality_status.setText(f'Scanning {len(chapters)} saved chapters; {len(group["unfinished"])} unfinished part(s) are not treated as failures.')
+        proc.start()
+
+    def quality_process_output(self):
+        """Consume machine-readable worker progress without rebuilding issue rows."""
+        if self.quality_proc is None:
+            return
+        self.quality_buffer += bytes(self.quality_proc.readAllStandardOutput()).decode('utf-8', 'replace')
+        while '\n' in self.quality_buffer:
+            line, self.quality_buffer = self.quality_buffer.split('\n', 1)
+            if not line.startswith(QC_EVENT_PREFIX):
+                if line.strip():
+                    self.write_log('QC: ' + line.strip())
+                continue
+            try:
+                event = json.loads(line[len(QC_EVENT_PREFIX):])
+                if event.get('kind') == 'progress':
+                    self.quality_progress.setValue(int(100 * event['current'] / max(1, event['total'])))
+                    self.quality_status.setText(
+                        f"Scanning EPUB section {event['chapter']} "
+                        f"({event['current']}/{event['total']})… "
+                        f"{event['issues']} potential issues found so far.")
+            except (ValueError, KeyError, TypeError):
+                self.write_log('QC: unrecognized progress event')
+
+    def quality_process_error(self, _error):
+        """Log failed subprocess launches; finished() releases the Qt wrapper."""
+        if self.quality_proc is not None:
+            self.quality_status.setText('Quality scan process failed: ' + self.quality_proc.errorString())
+            if _error == QProcess.FailedToStart:
+                p = self.quality_proc
+                self.quality_proc = None
+                self.quality_scan_button.setEnabled(True)
+                self.quality_stop_button.setEnabled(False)
+                p.deleteLater()
+
+    def quality_finished(self, exit_code, exit_status):
+        """Release the worker, then load one atomic report into the issues table."""
+        p = self.quality_proc
+        if p is None:
+            return
+        self.quality_process_output()
+        self.quality_proc = None
+        self.quality_scan_button.setEnabled(True)
+        self.quality_stop_button.setEnabled(False)
+        successful = exit_code == 0 and exit_status == QProcess.NormalExit
+        p.deleteLater()
+        if successful:
+            self.quality_load_report()
+            self.quality_progress.setValue(100)
+            self.statusBar().showMessage('Quality Control scan complete.')
+        else:
+            self.quality_status.setText('QC scan stopped or failed; existing reports and WAVs remain unchanged.')
+            self.statusBar().showMessage('Quality Control scan stopped or failed.')
+
+    def stop_quality(self):
+        """Stop only the independent scanner, leaving all audio and jobs intact."""
+        if self.quality_proc is not None:
+            self.quality_proc.kill()
+
+    def quality_current_issue(self):
+        """Find the selected issue independent of sorted/filtered table text."""
+        row = self.quality_table.currentRow()
+        if 0 <= row < len(self.quality_visible_issues):
+            return self.quality_visible_issues[row]
+        return None
+
+    def quality_play_audio(self):
+        """Play the flagged chunk WAV or assembled chapter using desktop audio."""
+        problem = self.quality_current_issue()
+        path = Path(problem.get('path') or '') if problem else None
+        if path is not None and path.is_file() and path.suffix.lower() == '.wav':
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        else:
+            QMessageBox.information(self, 'Audio unavailable',
+                'Choose an issue with an existing WAV file, or regenerate its missing chapter.')
+
+    def quality_open_folder(self):
+        """Open the narrator-local report directory without touching the WAVs."""
+        group = self.quality_selected_group()
+        if group:
+            folder = group['folder'] / 'quality_reports'
+            if folder.is_dir():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+                return
+        QMessageBox.information(self, 'No report yet', 'Run a Quality Control scan first.')
+
+    def quality_open_editor(self):
+        """Select the flagged chapter on Review Audio and open its chunk editor."""
+        problem = self.quality_current_issue()
+        group = self.quality_selected_group()
+        book_id = self.quality_book.currentData()
+        if not problem or not group or book_id is None:
+            QMessageBox.information(self, 'Select an issue', 'Choose a flagged chapter first.')
+            return
+        self.review_book.setCurrentIndex(self.review_book.findData(book_id))
+        self.change_page(3)
+        target = (group['folder'] / 'chapters' / f"{int(problem['chapter']):04d}.wav").resolve()
+        for r in range(self.review_table.rowCount()):
+            cell = self.review_table.item(r, 0)
+            if cell is not None and Path(str(cell.data(Qt.UserRole))).resolve() == target:
+                self.review_table.selectRow(r)
+                self.review_table.scrollToItem(cell)
+                self.open_chunk_editor()
+                return
+        QMessageBox.information(self, 'Chapter not ready',
+            'This chapter has no assembled WAV to edit yet. Rebuild the missing chapter first.')
 
     def make_settings_page(self):
         """Build optional MySQL, cache, and application settings controls."""
@@ -992,6 +1316,7 @@ class Studio(QMainWindow):
                     combo.setCurrentIndex(idx)
         self.gen_book.blockSignals(False)
         self.review_book.blockSignals(False)
+        self.quality_refresh_books()
         if books:
             self.book_combo_changed()
         else:
@@ -1686,12 +2011,14 @@ class Studio(QMainWindow):
             output = group['folder'] / (output_name + '.m4b')
             excluded = int(book['sections']) - len(indices)
             overwrite = '\nAn existing complete M4B will be replaced after verification.' if output.exists() else ''
+            quality_note = quality_preflight(group['folder'], indices)
             prompt = (f"Combine {len(group['parts'])} finished part(s) into one M4B?\n\n"
                       f"Narrator: {voice_name(group['voice_path'])}\n"
                       f"Chapters: {len(indices)} (EPUB sections {indices[0]}–{indices[-1]})\n"
                       f"Unselected EPUB sections: {excluded}\n"
                       f"Encoding: AAC 64 kbps mono, with chapter markers\n\n"
                       f"Output: {output}\n\n"
+                      f"Quality check: {quality_note}\n\n"
                       'All chapter WAVs and individual part M4Bs will remain unchanged.' + overwrite)
             if QMessageBox.question(self, 'Export complete audiobook', prompt,
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
@@ -1920,6 +2247,11 @@ class Studio(QMainWindow):
 
     def closeEvent(self, event):
         """Remember window state and ask for a safe shutdown if generation is active."""
+        if self.quality_proc is not None:
+            QMessageBox.information(self, 'Quality scan running',
+                'Stop the quality scan before closing AudiobookAI.')
+            event.ignore()
+            return
         editor = getattr(self, 'editor_dialog', None)
         if editor is not None and editor.isVisible() and editor.proc is not None:
             QMessageBox.information(self, 'Audio editor busy',
