@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.1**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.2 preview**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -17,6 +17,7 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
 - **V2.7 Read Along:** Play completed chapter WAVs with highlighted saved narration chunks, click a chunk to seek, and open its chapter in the existing audio editor, automatically refresh repaired chapters, and resume where you left off. Chunk timing is estimated rather than sample-accurate.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
+- **V2.8.2 GUI stability preview:** Reduce high-frequency PySide widget painting, persist full job logs without flooding the GUI, load FFmpeg playback only when Read Along opens, and provide a Qt-free queue runner for overnight conversions. This mitigates a reported native extension crash but needs extended on-device validation.
 - **V2.8.1 hotfix:** Reserve new job IDs beyond all existing frozen pronunciation snapshots, even after deleting an old queue part.
 - **V2.8 Reliability & Recovery:** Safely requeue interrupted parts with dependency checks, keep per-job converter logs on disk, and make verified periodic backups of small project metadata.
 - **Optional MySQL mirror:** Synchronize library, chapter, and job metadata to a MySQL database for querying. SQLite remains the authoritative local store; audio itself stays on disk.
@@ -244,3 +245,50 @@ or private MySQL passwords. They are stored on the same disk by default, so
 copy the archives **and your separate media folders** to external storage
 to protect against drive failure. Restoring paths and snapshots onto a new
 machine may require adjusting paths; there is no one-click restore yet.
+
+### V2.8.2 long-run GUI stability preview
+
+This update reduces GUI calls made for each of the thousands of narration chunks
+in a long audiobook. The queue's SQLite checkpoints, Chatterbox inference,
+existing cache-key algorithm, part naming and chapter output are unchanged.
+Routine `Using cached audio.` and `Generated ...` messages are still saved
+to per-job logs but no longer cause every line to relayout the GUI log viewer.
+Read Along's QtMultimedia/FFmpeg backend loads only when opening its tab, not
+during startup or an ordinary conversion.
+
+**Caveat:** Python's `none_dealloc` abort indicates a C-extension
+reference-count fault. The traceback may identify where it surfaced, not where
+it originated. This patch reduces native GUI churn and should be tested with a
+long conversion before being treated as a fully proven fix. If the GUI aborts,
+the persisted cache and completed chapter audio remain available. Before
+retrying, check for a surviving converter process to avoid concurrent writers.
+
+### Long conversions without the GUI (V2.8.2 preview)
+
+A native PySide6 `none_dealloc` abort has been observed in the progress
+display after eight and eleven hours. Reducing GUI repaints alone did **not**
+resolve it. To avoid depending on a Qt event loop for a 90-hour book, this
+preview also provides a Qt-free queue runner. It uses the very same existing
+SQLite queue, selected EPUB sections, saved narrator, immutable per-job
+pronunciation rules and V7 cache; **do not add duplicate jobs or reset files**.
+
+1. Close Studio; use `pgrep -af 'epub_to_audiobook_v7_studio.py'` to
+   confirm a crashed GUI did not leave a converter running.
+2. In `~/AudiobookAI` with `.venv-chatterbox` activated, use:
+   `python scripts/audiobookai_headless.py --list`
+3. Choose the interrupted/failed existing job ID, then run:
+   `python scripts/audiobookai_headless.py --job ID`
+4. The console prints completed chapter/export milestones. Per-job diagnostics
+   remain in `output/diagnostics`, and chunk progress remains in SQLite.
+   Run it in `tmux` (if installed) for an overnight conversion that continues
+   when a terminal window is closed. Detach with Ctrl+B then D, reattach with
+   `tmux attach -t audiobookai`.
+5. Do not open Studio during headless conversion or launch another writer for
+   the same book. The preview explicitly refuses to start the GUI when the
+   headless runner is holding its process lock.
+
+Completed WAVs and raw speech chunks are reused by the unchanged converter.
+The runner starts exactly **one** selected job per invocation; it does not
+automatically run the entire queue. It marks the job complete only when a
+matching M4B file is verified, or records an error/interrupted status. This is
+an operational workaround for the observed Qt crash, **not** a root-cause fix.
