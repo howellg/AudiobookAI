@@ -44,6 +44,7 @@ from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
+from audiobookai_gui_throttle import progress_snapshot, routine_speech_log
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
@@ -175,6 +176,7 @@ class Studio(QMainWindow):
         self.archive_proc = None
         self.archive_output = None
         self.archive_groups = []
+        self._progress_last_values = {}
         self.active_job_log = None
         self.diagnostic_lines = deque(maxlen=40)
         self.backup_dir = ROOT / 'output' / 'metadata_backups'
@@ -305,6 +307,7 @@ class Studio(QMainWindow):
         if index == 7 and self.archive_proc is None:
             self.archive_refresh_books()
         if index == 8:
+            self.reader_initialize_audio()
             self.reader_refresh_books()
         elif hasattr(self, 'reader_audio') and self.reader_audio is not None:
             self.reader_save_progress()
@@ -1444,6 +1447,12 @@ class Studio(QMainWindow):
         self.reader_last_persist_ms = 0
         self.reader_pending_resume = None
         self.reader_switching = False
+        # Keep FFmpeg/NVIDIA multimedia backend unloaded during long TTS jobs.
+
+    def reader_initialize_audio(self):
+        """Initialize QtMultimedia only when the Read Along page is requested."""
+        if self.reader_audio is not None:
+            return
         try:
             from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
             self.reader_audio = QMediaPlayer(self)
@@ -1455,6 +1464,8 @@ class Studio(QMainWindow):
             self.reader_audio.durationChanged.connect(
                 lambda ms: self.reader_position.setMaximum(max(0, ms)))
             self.reader_audio.errorOccurred.connect(self.reader_playback_error)
+            if self.reader_wav_path:
+                self.reader_audio.setSource(QUrl.fromLocalFile(self.reader_wav_path))
         except ImportError:
             self.reader_summary.setText(
                 'Qt multimedia support is unavailable. Install the matching PySide6 QtMultimedia component.')
@@ -1978,12 +1989,13 @@ class Studio(QMainWindow):
         QMessageBox.critical(self, title, str(message))
         self.write_log(f'ERROR: {message}')
 
-    def write_log(self, text):
+    def write_log(self, text, *, gui=True):
         # QPlainTextEdit maintains the scroll position automatically when
         # appending; avoid retaining a transient QScrollBar wrapper after
         # appendPlainText() causes internal Qt layout/scrollbar changes.
         """Append a converter message to the bounded log viewer."""
-        self.logs.appendPlainText(str(text))
+        if gui:
+            self.logs.appendPlainText(str(text))
         if self.active_job_log is not None:
             try:
                 append_diagnostic(self.active_job_log, text)
@@ -2567,6 +2579,7 @@ class Studio(QMainWindow):
         self.buffer = ''
         self.last_progress_save = 0.0
         self.last_progress_chunks = 0
+        self._progress_last_values.clear()
         self.chapter_progress.setValue(0)
         self.overall_progress.setValue(0)
         self.active_title.setText(f"Generating: {job['book_title']} — {job['name']}")
@@ -2576,6 +2589,8 @@ class Studio(QMainWindow):
         # Mark the job running before launching, so an unclean GUI exit is recoverable.
         self.store.update_job(job_id, 'running')
         self.refresh_jobs()
+        self._progress_last_values.clear()
+        self._last_paint = 0.0
         self.write_log(f"\n──── Starting job #{job_id}: {job['name']} · {voice_name(job['voice_path'])} ────")
         self.proc.start()
         self.statusBar().showMessage('Chatterbox conversion running…')
@@ -2604,8 +2619,11 @@ class Studio(QMainWindow):
                 continue
             if 'FutureWarning:' in line or 'sdpa' in line or 'self.gen = func' in line:
                 continue
-            self.diagnostic_lines.append(line)
-            self.write_log(line)
+            if not routine_speech_log(line):
+                self.diagnostic_lines.append(line)
+            # Per-chunk chatter goes to the durable disk log, not the Qt text
+            # viewer; warnings and errors remain visible and diagnostic.
+            self.write_log(line, gui=not routine_speech_log(line))
 
     def progress_event(self, event):
         """Interpret JSON progress events and update chapter, total, and export state."""
@@ -2643,7 +2661,7 @@ class Studio(QMainWindow):
             self.write_log(f"Finished M4B: {self.last_output_path} ({fmt_size(event['size_bytes'])})")
         # Coalesce cached chunk repaint bursts; always paint chapter/export boundaries.
         paint_time = time.monotonic()
-        if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 0.4:
+        if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 2.0:
             self.paint_progress()
             self._last_paint = paint_time
         if kind in ('plan', 'chapter_started', 'chapter_done', 'export_started', 'export_done'):
@@ -2666,28 +2684,24 @@ class Studio(QMainWindow):
         self.last_progress_chunks = done
 
     def paint_progress(self):
-        """Update progress bars and ETA from the current chunk plan and timing samples."""
+        """Update changed labels sparingly while all SQLite checkpoints continue."""
         if not self.plan:
             return
-        done = sum(self.done_chunks.values())
-        total = max(1, self.total_chunks)
-        ratio = done / total
-        # 98% covers TTS, remaining 2% is final M4B mux/encode.
-        # Reserve the last 2% for encoding instead of showing 100% before export exists.
-        display = 98.0 * ratio
-        self.overall_progress.setValue(round(display * 10))
-        self.overall_text.setText(f'Overall: {display:.1f}% · {done:,} / {total:,} chunks')
-        if self.current_section in self.plan and not self.exporting:
-            section = self.plan[self.current_section]
-            ct = max(1, int(section['chunks']))
-            cd = self.done_chunks[self.current_section]
-            self.chapter_progress.setValue(round(1000 * cd / ct))
-            self.chapter_text.setText(f"Section {self.current_section}: {section['title']} — {cd:,}/{ct:,} chunks ({100*cd/ct:.1f}%)")
-        self.stat_chunks.setText(f'Chunks: {done:,} / {total:,}')
-        if self.chunk_durations and not self.exporting:
-            remaining = max(0, total-done)
-            eta = remaining * (sum(self.chunk_durations)/len(self.chunk_durations))
-            self.stat_eta.setText(f'ETA: ~{fmt_seconds(eta)} + export')
+        view, eta = progress_snapshot(
+            self.plan, self.done_chunks, self.current_section, self.exporting,
+            self.chunk_durations)
+        if eta is not None:
+            view['stat_eta'] = f'ETA: ~{fmt_seconds(eta)} + export'
+        # Avoid repeatedly entering PySide6 native setters during 90-hour jobs.
+        for name, value in view.items():
+            if self._progress_last_values.get(name) == value:
+                continue
+            widget = getattr(self, name)
+            if name.endswith('_progress'):
+                widget.setValue(value)
+            else:
+                widget.setText(value)
+            self._progress_last_values[name] = value
 
     def tick(self):
         """Refresh elapsed-time text when a conversion is active."""
