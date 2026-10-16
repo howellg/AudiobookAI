@@ -18,7 +18,7 @@ def routine_speech_log(line: str) -> bool:
 def progress_snapshot(plan, done_chunks, current_section, exporting, chunk_durations):
     """Compute bounded progress labels/values without touching any Qt objects."""
     if not plan:
-        return {}
+        return {}, None
     completed = sum(max(0, int(value)) for value in done_chunks.values())
     total = max(1, sum(max(0, int(item["chunks"])) for item in plan.values()))
     completed = min(completed, total)
