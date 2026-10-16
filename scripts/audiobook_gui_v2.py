@@ -45,6 +45,7 @@ from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import progress_snapshot, routine_speech_log
+from audiobookai_headless import headless_runner_active
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
@@ -2509,6 +2510,13 @@ class Studio(QMainWindow):
 
     def start_job(self, job_id):
         """Create a separate converter process with fixed sections, narrator, and output name."""
+        if headless_runner_active():
+            self.run_queue = False
+            self.statusBar().showMessage('Headless converter active; GUI generation paused.')
+            self.error('Headless conversion running',
+                       'A headless audiobook conversion is active. Do not start a second '
+                       'converter for the same cache. Resume GUI generation only after it ends.')
+            return
         if self.proc is not None:
             return
         editor = getattr(self, 'editor_dialog', None)
@@ -3289,6 +3297,12 @@ def main():
     """Construct the Qt application and run its event loop."""
     app = QApplication(sys.argv)
     app.setApplicationName('AudiobookAI Studio')
+    if headless_runner_active():
+        QMessageBox.warning(None, 'Headless audiobook conversion running',
+            'An audiobook job is running without Qt. Do not open Studio until it finishes; '
+            'opening the queue could mislabel its running job as interrupted.\n\n'
+            'Check progress in your headless terminal or saved diagnostic log.')
+        return 2
     # `palette(mid)` is nearly invisible on some KDE dark themes. Mix the
     # foreground with the window color for accessible secondary text.
     foreground = app.palette().color(QPalette.WindowText)
