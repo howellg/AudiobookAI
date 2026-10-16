@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.8.2 (preview) — Long-running GUI stability
+
+- Reduce native PySide6 progress widget setter calls during multi-hour TTS jobs.
+- Throttle routine chunk repainting to two seconds while preserving every durable
+  SQLite checkpoint and all converter operations.
+- Retain per-chunk diagnostic messages in job logs, but omit routine cache/generation
+  chatter from the Qt log viewer; warnings/errors remain visible.
+- Initialize QtMultimedia only when opening Read Along instead of on app startup,
+  keeping the FFmpeg/NVIDIA multimedia backend out of ordinary generation sessions.
+- Add focused regression tests for bursty events, unchanged widgets, and diagnostics.
+- This is a mitigation for a reported native extension refcount crash, not a
+  confirmed root-cause resolution or a substitute for an on-device long-run test.
+
+
 ## 2.8.1 — Pronunciation snapshot ID hotfix
 
 - Preserve immutable pronunciation snapshots when older queue entries have been deleted.
