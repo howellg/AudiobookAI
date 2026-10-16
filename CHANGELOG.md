@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.8.2 (preview) — Long-running GUI stability
+## 2.8.2 (preview) — Long-running GUI stability and Qt-free generation
 
 - Reduce native PySide6 progress widget setter calls during multi-hour TTS jobs.
 - Throttle routine chunk repainting to two seconds while preserving every durable
@@ -9,7 +9,15 @@
   chatter from the Qt log viewer; warnings/errors remain visible.
 - Initialize QtMultimedia only when opening Read Along instead of on app startup,
   keeping the FFmpeg/NVIDIA multimedia backend out of ordinary generation sessions.
-- Add focused regression tests for bursty events, unchanged widgets, and diagnostics.
+- Add a Qt-free headless converter runner for existing queued jobs, including
+  frozen pronunciation snapshot, saved voice, SQLite progress checkpoints,
+  diagnostic logs, and verified M4B completion.
+- Prevent the GUI from being opened while a headless runner owns the lock,
+  avoiding concurrent writers and accidental recovery-status migration.
+- Add focused regression tests for bursty events, unchanged widgets,
+  diagnostics and headless resume validation.
+- The initial GUI repaint mitigation was not sufficient: a second 11-hour
+  conversion also crashed; headless generation is the recommended workaround.
 - This is a mitigation for a reported native extension refcount crash, not a
   confirmed root-cause resolution or a substitute for an on-device long-run test.
 
