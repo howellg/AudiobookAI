@@ -70,6 +70,20 @@ def reserve_runner():
     return lock
 
 
+def headless_runner_active():
+    """Check advisory lock without disturbing another runner's ownership."""
+    if not LOCK_PATH.exists():
+        return False
+    with LOCK_PATH.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        else:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return False
+
+
 def checked_job(job: dict, *, snapshot_dir=SNAPSHOTS, converter=CONVERTER):
     """Construct original V7 converter args; never replace a queued snapshot."""
     if job["status"] not in ("queued", "interrupted", "failed"):
@@ -221,6 +235,8 @@ def run_job(store, job_id, *, process_factory=subprocess.Popen, verbose=False):
             except subprocess.TimeoutExpired:
                 print("Converter did not stop promptly; check for a surviving process.",
                       file=sys.stderr, flush=True)
+        store.update_job(job_id, "failed",
+                         error=f"Headless runner error: {exc}; log: {log_file}")
         raise
     finally:
         checkpoint.save(force=True)
