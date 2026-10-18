@@ -14,7 +14,7 @@ You will need:
 - A **WAV reference recording** you are permitted to use as a narrator sample. This is not bundled in the repository.
 - Sufficient storage for model dependencies, cached speech, chapter WAVs, and final M4Bs. Large books can create many intermediate files.
 
-**Python 3.11 is recommended and required by the current `pyproject.toml` manifest.** The project was developed against a Python 3.11 Chatterbox environment. Dependencies are now declared, but a **tested lockfile has not been committed yet**; clean installs may require GPU-specific troubleshooting.
+**Python 3.11 is recommended and required by the current `pyproject.toml` manifest.** The project was developed against a Python 3.11 Chatterbox environment. Dependencies are now declared, but a **tested lockfile has not been committed yet**; clean installs may require GPU-specific troubleshooting. **Use PySide6 6.11.2 rather than 6.12.0.** Long-running GUI sessions on the original developer machine repeatedly crashed with a native `none_dealloc` error under 6.12.0 and have shown substantially improved stability after downgrading to 6.11.2. This is a tested workaround, not a proven upstream root cause.
 
 > **If AudiobookAI already runs on your computer:** Do **not** delete `.venv-chatterbox/`, `output/`, `books/`, or `voices/`, and do not blindly reinstall PyTorch. Skip to [Start the application](#5-start-the-application) using your existing virtual environment.
 
@@ -94,7 +94,7 @@ The executable should live inside the repository's `.venv-chatterbox/` directory
 
 | Extra | Installs | Needed for |
 | --- | --- | --- |
-| Base | PySide6, EbookLib, Beautiful Soup, lxml, NumPy, SoundFile | Desktop application and EPUB processing |
+| Base | **PySide6==6.11.2**, EbookLib, Beautiful Soup, lxml, NumPy, SoundFile | Desktop application and EPUB processing |
 | `tts` | `chatterbox-tts==0.1.7` and its upstream dependencies | Speech generation, Torch, TorchAudio |
 | `mysql` | `mysql-connector-python`, `keyring` | Optional MySQL metadata mirror / credential storage |
 
@@ -136,7 +136,30 @@ For an NVIDIA GPU, `GPU available: True` is what you want. If it is `False`, che
 ### 4.2 Application dependencies
 
 ```bash
-uv pip install PySide6 ebooklib beautifulsoup4 lxml numpy soundfile
+uv pip install 'PySide6==6.11.2' ebooklib beautifulsoup4 lxml numpy soundfile
+```
+
+**Why this version is pinned:** PySide6 6.12.0 and its matching Shiboken bindings were present during multiple long-running native `none_dealloc` / `SIGABRT` GUI crashes. PySide6 **6.11.2** has run materially longer without that failure on the development laptop. The cause is still unconfirmed, so avoid upgrading to 6.12.x until the issue is understood and retested.
+
+For an **existing environment already using 6.12.0**, downgrade the Qt bindings without recreating the environment:
+
+```bash
+uv pip install 'PySide6==6.11.2'
+uv pip check
+```
+
+The main `PySide6` package installs matching **PySide6-Addons**, **PySide6-Essentials**, and **shiboken6**. Some older environments also have optional `pyside6-pdf` or `pyside6-webengine` packages tied to PySide6 6.12.0. AudiobookAI does **not** use these extras. If `uv pip check` reports those specific version conflicts and you do not use these packages elsewhere in this environment, uninstall them:
+
+```bash
+uv pip uninstall pyside6-pdf pyside6-webengine
+uv pip check
+```
+
+Check all installed Qt bindings match:
+
+```bash
+python -c 'import PySide6, shiboken6; print("PySide6:", PySide6.__version__, "Shiboken:", shiboken6.__version__)'
+uv pip freeze | grep -iE 'pyside6|shiboken6'
 ```
 
 **Optional MySQL mirror / credential storage:**
@@ -304,7 +327,7 @@ Before any significant upgrade, close active conversions and back up the SQLite 
 | EPUB chapters incorrectly grouped | Run `inspect` and check section numbering. EPUB structures vary; do not assume every XHTML file is one chapter. |
 | Model download warning / slow first run | Chatterbox model files may need an initial Hugging Face download. An authentication warning is not necessarily a fatal error. |
 | MySQL offline or sync pending | SQLite still holds the local queue. Check server availability, credentials, and `sql/setup_mysql.sql`; do not delete the SQLite database. |
-| `none_dealloc` / `SIGABRT` native GUI crash | This has occurred during development with Qt/MySQL-related native extensions. Save the traceback and exact versions; process isolation reduces one risk but is not a guaranteed cure. |
+| `none_dealloc` / `SIGABRT` native GUI crash | Check for **PySide6 / Shiboken 6.12.x**. Pin the matched stack to **6.11.2** as shown in §4.2. The downgrade improved long-run stability on the development machine but is not a confirmed root-cause fix. Check for a surviving converter process before resuming an existing job; the Qt-free headless runner is available for unattended work. Save the traceback and exact versions. |
 | Reused audio has the wrong narrator | Confirm the job narrator and voice snapshot, and avoid changing reference WAVs mid-job. |
 | Resume seems to skip chapters | The backend recognizes already completed chapter WAVs and compatible cached speech. Check the output folder and chapter index before deleting anything. |
 | Disk usage grows | Raw chunk caches and chapter WAVs can be large; preview cleanup in Settings only after you no longer need to resume or rebuild. |

@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.8.2 — Qt stability improvements and headless conversion
+
+- Reduce native PySide6 progress widget setter calls during multi-hour TTS jobs.
+- Throttle routine chunk repainting to two seconds while preserving every durable
+  SQLite checkpoint and all converter operations.
+- Retain per-chunk diagnostic messages in job logs, but omit routine cache/generation
+  chatter from the Qt log viewer; warnings/errors remain visible.
+- Initialize QtMultimedia only when opening Read Along instead of on app startup,
+  keeping the FFmpeg/NVIDIA multimedia backend out of ordinary generation sessions.
+- Add a Qt-free headless converter runner for existing queued jobs, including
+  frozen pronunciation snapshot, saved voice, SQLite progress checkpoints,
+  diagnostic logs, and verified M4B completion.
+- Prevent the GUI from being opened while a headless runner owns the lock,
+  avoiding concurrent writers and accidental recovery-status migration.
+- Add focused regression tests for bursty events, unchanged widgets,
+  diagnostics and headless resume validation.
+- Pin the GUI dependency and installation instructions to **PySide6==6.11.2**.
+  The 6.12.0/6.12.0 Shiboken stack had reproducible native `none_dealloc`
+  failures in multi-hour Arch/KDE sessions; downgrading to 6.11.2 substantially
+  improved observed long-run stability.
+- Note that optional `pyside6-pdf` and `pyside6-webengine` 6.12-era packages
+  may require removal if they conflict with the pinned runtime. Neither is
+  needed by AudiobookAI.
+- Repaint throttling alone did not fix the crashes. Headless conversion remains
+  available as a Qt-free option for very long unattended jobs.
+- The PySide6 version change is an empirical workaround, not proof of the
+  underlying native reference-count defect's root cause.
+
+
 ## 2.8.1 — Pronunciation snapshot ID hotfix
 
 - Preserve immutable pronunciation snapshots when older queue entries have been deleted.
