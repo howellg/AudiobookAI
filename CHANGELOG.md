@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.8.2 (preview) — Long-running GUI stability and Qt-free generation
+## 2.8.2 — Qt stability improvements and headless conversion
 
 - Reduce native PySide6 progress widget setter calls during multi-hour TTS jobs.
 - Throttle routine chunk repainting to two seconds while preserving every durable
@@ -16,10 +16,17 @@
   avoiding concurrent writers and accidental recovery-status migration.
 - Add focused regression tests for bursty events, unchanged widgets,
   diagnostics and headless resume validation.
-- The initial GUI repaint mitigation was not sufficient: a second 11-hour
-  conversion also crashed; headless generation is the recommended workaround.
-- This is a mitigation for a reported native extension refcount crash, not a
-  confirmed root-cause resolution or a substitute for an on-device long-run test.
+- Pin the GUI dependency and installation instructions to **PySide6==6.11.2**.
+  The 6.12.0/6.12.0 Shiboken stack had reproducible native `none_dealloc`
+  failures in multi-hour Arch/KDE sessions; downgrading to 6.11.2 substantially
+  improved observed long-run stability.
+- Note that optional `pyside6-pdf` and `pyside6-webengine` 6.12-era packages
+  may require removal if they conflict with the pinned runtime. Neither is
+  needed by AudiobookAI.
+- Repaint throttling alone did not fix the crashes. Headless conversion remains
+  available as a Qt-free option for very long unattended jobs.
+- The PySide6 version change is an empirical workaround, not proof of the
+  underlying native reference-count defect's root cause.
 
 
 ## 2.8.1 — Pronunciation snapshot ID hotfix
