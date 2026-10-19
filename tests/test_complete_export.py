@@ -83,6 +83,13 @@ class CompleteExportTests(unittest.TestCase):
             exported = converter.export_m4b(epub, 'Test Book', 'Author', sections, chosen,
                                              folder, 'Test_Book_COMPLETE')
             self.assertTrue(exported.is_file())
+            # A readable queued part basename must survive converter sanitizing
+            # unchanged, while legacy _COMPLETE exports remain discoverable.
+            friendly = converter.export_m4b(
+                epub, 'Test Book', 'Author', sections, chosen, folder,
+                'Test Book - Part 01 (Sections 3-5)')
+            self.assertEqual(friendly.name, 'Test Book - Part 01 (Sections 3-5).m4b')
+            self.assertTrue(exported.is_file())
             probe = subprocess.run(['ffprobe', '-v', 'error', '-show_chapters',
                                     '-show_entries', 'chapter=start_time,end_time:chapter_tags=title',
                                     '-of', 'json', str(exported)], capture_output=True,
