@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import audiobookai_production as production
+from audiobookai_convenience import readable_m4b_basename
 from audiobookai_pronunciation import load_snapshot, apply_rules, rules_digest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -547,7 +548,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
         lines.extend(["[CHAPTER]", "TIMEBASE=1/1000", f"START={start_ms}", f"END={end_ms}",
                       f"title={ffmeta_escape(sections[i-1].title)}"])
     metadata.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    name = safe_name(output_name, 130) if output_name else (
+    name = readable_m4b_basename(output_name, 130) if output_name else (
         safe_name(title, 100) + ("_sample" if len(chosen)<len(sections) else ""))
     output = out / (name + ".m4b")
     partial = output.with_name(output.stem + ".partial.m4b")

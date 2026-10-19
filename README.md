@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.2**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.3**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -38,6 +38,19 @@ python scripts/audiobook_gui_v2.py
 ```
 
 For a fresh clone, follow [INSTALL.md](INSTALL.md) first. You must provide your own DRM-free EPUB and at least one suitable narrator WAV; neither is distributed with this repository.
+
+## Readable M4B part filenames (V2.8.3)
+
+Newly queued audiobooks use a filename such as
+`A New Player in the Game - Part 09 (Sections 123-137).m4b` rather than
+underscores and a random hash. Part numbers continue per book and narrator
+across queue batches. EPUB **section** numbers are used intentionally because
+they don't always match printed chapter numbers.
+
+Files with the same proposed name receive a readable suffix (`(2)`, `(3)`,
+and so on) so existing exports aren't replaced. **Existing queued jobs and
+completed M4Bs keep their original filenames**, preserving snapshots, resume
+records, and output verification.
 
 ## Typical workflow
 
