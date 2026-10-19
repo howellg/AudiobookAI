@@ -20,7 +20,6 @@ import json
 import re
 import sys
 import time
-import uuid
 from collections import deque
 from pathlib import Path
 
@@ -36,7 +35,8 @@ from PySide6.QtWidgets import (
 from audiobookai_storage import (Store, read_config, write_config,
                                   lookup_password, save_password)
 from audiobookai_mysql_proxy import MySQLMirror
-from audiobookai_convenience import parse_section_ranges, job_category, estimate_audio_duration
+from audiobookai_convenience import (parse_section_ranges, job_category,
+                                     estimate_audio_duration, part_export_basename)
 from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_choices,
                                 import_voice, freeze_voice, voice_name)
 from audiobookai_production import cache_summary, remove_raw_cache
@@ -2301,13 +2301,19 @@ class Studio(QMainWindow):
         except Exception as exc:
             self.error('Unable to queue narrator WAV', exc)
             return
-        for i, numbers in enumerate(parts, 1):
+        # Reserve names before persisting immutable jobs. Each narrator has a
+        # readable part sequence; existing exports/queued names must never be
+        # overwritten, including audio left by a deleted job.
+        existing = [j for j in self.store.jobs() if j['book_id'] == self.current_book_id]
+        occupied = {j['output_name'] for j in existing}
+        voice_id = str(fixed_voice) if fixed_voice is not None else None
+        next_part = 1 + sum(j['voice_path'] == voice_id for j in existing)
+        folder = self.converter.book_folder(Path(book['path']), fixed_voice)
+        for i, numbers in enumerate(parts, next_part):
             span = f'{numbers[0]}-{numbers[-1]}' if len(numbers) > 1 else str(numbers[0])
-            # Generate the unique output basename BEFORE writing the job, so a
-            # sudden restart cannot leave a job pointing to an old sample file.
-            name = f'Part {i:02d} · sections {span}' if len(parts) > 1 else f'Sections {span}'
-            suffix = uuid.uuid4().hex[:12]
-            output_base = self.converter.safe_name(f"{book['title']}_part_{i:02d}_sections_{span}_{suffix}", 125)
+            name = f'Part {i:02d} · sections {span}'
+            output_base = part_export_basename(book['title'], i, numbers, occupied, folder)
+            occupied.add(output_base)
             # A new part captures the dictionary as it exists NOW. This file is
             # never updated on subsequent dictionary edits or GUI restarts.
             new_job_id = self.store.add_job(self.current_book_id, name, numbers, output_base,
