@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.8.3 — Readable part M4B filenames
+
+- Name new part exports like `A New Player in the Game - Part 09 (Sections 123-137).m4b`
+  instead of using underscores and a random hash.
+- Continue part numbering for each book/narrator across separate queue batches.
+- Show explicit EPUB section numbers rather than assuming the EPUB section
+  indices equal printed chapter numbers. Note discontiguous selections.
+- Avoid replacing an existing export by using readable `(2)`, `(3)`, etc.
+  suffixes; check both queued names and previously exported files.
+- Keep existing job output names, completed audio, narration caches, and frozen
+  pronunciation snapshots unchanged for safe interrupted-job recovery.
+- Add naming, collision, legacy-compatibility and FFmpeg integration tests.
+
+
 ## 2.8.2 — Qt stability improvements and headless conversion
 
 - Reduce native PySide6 progress widget setter calls during multi-hour TTS jobs.
