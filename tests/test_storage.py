@@ -386,7 +386,11 @@ class MySQLMirrorTests(unittest.TestCase):
             store = Store(Path(temp)/'local.sqlite3')
             book = store.import_book('/tmp/a.epub','Title','Author',
                 [Section(1,'Chapter I','Once upon a time')])
-            store.add_job(book,'Part 01',[1],'part_one')
+            completed = store.add_job(book,'Part 01',[1],'part_one')
+            output = Path(temp) / 'part_one.m4b'
+            output.write_bytes(b'x' * 2048)
+            store.complete_job(completed, output)
+            store.remove_job(completed)
             fake_conn = DummyConnection()
             fake_mysql = types.ModuleType('mysql')
             fake_connector = types.ModuleType('mysql.connector')
@@ -401,9 +405,9 @@ class MySQLMirrorTests(unittest.TestCase):
                 self.assertEqual(fake_conn.rollbacks,0)
                 self.assertGreaterEqual(fake_conn.commits,2)
                 joined = '\n'.join(q for q,_ in fake_conn.statements)
-                for table in ('books','book_sections','jobs','sync_state'):
+                for table in ('books','book_sections','jobs','completed_parts','sync_state'):
                     self.assertIn('CREATE TABLE IF NOT EXISTS '+table,joined)
-                self.assertIn('INSERT INTO jobs',joined)
+                self.assertIn('INSERT INTO completed_parts',joined)
                 self.assertIn('DELETE FROM books',joined)
                 # The replica contains SQL metadata; it doesn't store audio blobs.
                 self.assertNotIn('LONGBLOB',joined)
