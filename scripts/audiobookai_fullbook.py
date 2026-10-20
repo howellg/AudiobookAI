@@ -12,6 +12,63 @@ import json
 from pathlib import Path
 
 
+
+def compact_section_ranges(indices, limit=12):
+    """Summarize numbered EPUB sections without building an unbounded dialog."""
+    numbers = sorted(set(int(i) for i in indices))
+    spans = []
+    for number in numbers:
+        if spans and number == spans[-1][1] + 1:
+            spans[-1][1] = number
+        else:
+            spans.append([number, number])
+    parts = [str(first) if first == last else f'{first}–{last}'
+             for first, last in spans[:limit]]
+    if len(spans) > limit:
+        parts.append(f'… +{len(spans) - limit} more ranges')
+    return ', '.join(parts) if parts else 'none'
+
+
+def export_coverage(indices, total_sections):
+    """Audit queued EPUB coverage without assuming front/back matter is narration.
+
+    Gaps *inside* the selected range are especially likely to be accidental.
+    Outer exclusions may be intentional, but must be plainly disclosed.
+    This is advisory; verified finished selections may still be exported.
+    """
+    count = int(total_sections)
+    selected = sorted(set(int(i) for i in indices))
+    if count < 1 or not selected or selected[0] < 1 or selected[-1] > count:
+        raise ValueError('Cannot audit coverage with missing/out-of-range EPUB sections')
+    chosen = set(selected)
+    return {
+        'interior': [i for i in range(selected[0], selected[-1] + 1) if i not in chosen],
+        'before': list(range(1, selected[0])),
+        'after': list(range(selected[-1] + 1, count + 1)),
+        'selected': len(selected),
+        'total': count,
+    }
+
+
+def export_coverage_message(indices, total_sections):
+    """A readable, bounded summary for both complete-book export workflows."""
+    coverage = export_coverage(indices, total_sections)
+    interior = coverage['interior']
+    outside = coverage['before'] + coverage['after']
+    if interior:
+        lines = [
+            f'WARNING: {len(interior)} unselected EPUB section(s) INSIDE the '
+            f'export range: {compact_section_ranges(interior)}.',
+            'Check that no story chapters were accidentally skipped.',
+        ]
+    else:
+        lines = ['Coverage: no gaps between the first and last selected sections.']
+    if outside:
+        lines.append(f'{len(outside)} excluded outside the selected range: '
+                     f'{compact_section_ranges(outside)} (may be front/back matter).')
+    return '\n'.join(lines)
+
+
 def collect_export_groups(jobs, book_id, folder_for_voice):
     """Group all of a book's queue parts by their narrator's output directory.
 
