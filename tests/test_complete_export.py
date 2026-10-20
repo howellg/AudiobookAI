@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -83,6 +84,51 @@ class CompleteExportTests(unittest.TestCase):
             export_coverage([2, 6], 5)
         with self.assertRaises(ValueError):
             export_coverage([0, 2], 5)
+
+    def test_archive_page_includes_parts_cleared_from_queue(self):
+        from audiobookai_storage import Store
+        from audiobook_gui_v2 import Studio
+
+        class FakeCombo:
+            def __init__(self, book_id=None):
+                self.book_id = book_id
+                self.labels = []
+            def currentData(self):
+                return self.book_id
+            def blockSignals(self, _value):
+                pass
+            def clear(self):
+                self.labels.clear()
+            def addItem(self, label):
+                self.labels.append(label)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / 'metadata.sqlite3')
+            epub = root / 'book.epub'
+            epub.write_bytes(b'test')
+            sections = [converter.Section(i, f'Chapter {i}', [], 'text.xhtml')
+                        for i in (1, 2)]
+            book_id = store.import_book(epub, 'Book', 'Author', sections)
+            job = store.add_job(book_id, 'Part 1', [1, 2], 'Book - Part(1)')
+            m4b = root / 'Book - Part(1).m4b'
+            m4b.write_bytes(b'0' * 2048)
+            store.complete_job(job, m4b)
+            store.remove_job(job)
+            self.assertEqual(store.jobs(), [])
+            fake = SimpleNamespace(
+                store=store, converter=SimpleNamespace(
+                    book_folder=lambda epub_path, voice=None: root),
+                archive_book=FakeCombo(book_id),
+                archive_narrator=FakeCombo(),
+                archive_groups=[],
+                archive_narrator_changed=lambda: None)
+            Studio.archive_book_changed(fake)
+            self.assertEqual(len(fake.archive_groups), 1)
+            self.assertEqual(fake.archive_groups[0]['indices'], [1, 2])
+            self.assertEqual(fake.archive_groups[0]['unfinished'], [])
+            self.assertEqual(len(fake.archive_narrator.labels), 1)
+            store.close()
 
     def test_ffmpeg_makes_a_single_m4b_with_three_chapter_markers(self):
         """Exercise real FFmpeg chapter markers on WAVs assembled from separate parts."""
