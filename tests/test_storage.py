@@ -246,6 +246,47 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.completed_parts(book), [])
         store.close()
 
+    def test_recover_valid_legacy_part_missing_queue_row_only(self):
+        """Import old completed part files with a verified stream and all chapters."""
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(i, f'Chapter {i}', 'Text') for i in range(1, 5)])
+        export = self.path.parent / 'Novel_part_01_sections_1-3_32d13cf858be.m4b'
+        export.write_bytes(b'f' * 2048)
+        fake_info = {'streams': [{'codec_name': 'aac'}], 'format': {'duration': '120'},
+                     'chapters': [{}, {}, {}]}
+        with patch('subprocess.run') as probe:
+            probe.return_value.stdout = json.dumps(fake_info)
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 1)
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+        receipt = store.completed_parts(book)[0]
+        self.assertEqual(json.loads(receipt['indices']), [1, 2, 3])
+        self.assertEqual(receipt['part_number'], 1)
+        self.assertIsNone(receipt['source_job_id'])
+        self.assertEqual(store.claimed_sections(book), {1, 2, 3})
+        self.assertEqual(store.next_part_number(book), 2)
+        store.close()
+
+    def test_recovery_skips_truncated_legacy_part_and_active_queue_exports(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(i, f'Chapter {i}', 'Text') for i in range(1, 5)])
+        filename = 'Novel_part_01_sections_1-3_32d13cf858be'
+        export = self.path.parent / (filename + '.m4b')
+        export.write_bytes(b'f' * 2048)
+        with patch('subprocess.run') as probe:
+            probe.return_value.stdout = json.dumps({
+                'streams': [{'codec_name': 'aac'}], 'format': {'duration': '120'},
+                'chapters': [{}]})  # Only one chapter, but three are expected
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+        self.assertEqual(store.completed_parts(book), [])
+        job = store.add_job(book, 'Part 1', [1, 2, 3], filename)
+        with patch('subprocess.run') as probe:
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+            probe.assert_not_called()  # Existing queue still owns this export.
+        store.remove_job(job)
+        store.close()
+
     def test_backfill_existing_sections(self):
         """Verify backfill existing sections behavior."""
         store = Store(self.path)
