@@ -443,6 +443,10 @@ class Studio(QMainWindow):
         self.gen_details = QLabel('Import a book to begin.')
         self.gen_details.setObjectName('muted')
         l.addWidget(self.gen_details)
+        self.gen_saved_parts = QLabel('Completed parts: none yet')
+        self.gen_saved_parts.setObjectName('muted')
+        self.gen_saved_parts.setWordWrap(True)
+        l.addWidget(self.gen_saved_parts)
         narrator = QHBoxLayout()
         narrator.addWidget(QLabel('Narrator WAV:'))
         self.voice_combo = QComboBox()
@@ -2221,6 +2225,7 @@ class Studio(QMainWindow):
         self.store.populate_missing_sections(book_id, self.sections)
         words = sum(len(s.text.split()) for s in self.sections)
         self.gen_details.setText(f'{title} · {author} · {len(self.sections)} sections · {words:,} words')
+        self.refresh_saved_parts()
         self.section_table.blockSignals(True)
         self.section_table.setRowCount(len(self.sections))
         for r, sec in enumerate(self.sections):
@@ -2234,6 +2239,26 @@ class Studio(QMainWindow):
         self.update_selected_count()
         self.filter_chapters()
         self.restore_voice_for_book(book_id)
+
+    def refresh_saved_parts(self):
+        """Show durable verified exports even if their queue rows were deleted."""
+        if self.current_book_id is None:
+            self.gen_saved_parts.setText('Completed parts: none yet')
+            return
+        parts = self.store.completed_parts(self.current_book_id)
+        if not parts:
+            self.gen_saved_parts.setText('Completed parts: none yet')
+            return
+        available = sum(Path(part['output_path']).is_file() for part in parts)
+        section_set = {int(index) for part in parts for index in json.loads(part['indices'])}
+        numbers = ', '.join(str(part['part_number']) for part in parts[:18])
+        if len(parts) > 18:
+            numbers += ', …'
+        missing = f' · {len(parts) - available} missing file(s)' if available != len(parts) else ''
+        self.gen_saved_parts.setText(
+            f'Completed parts: {len(parts)} (Parts {numbers}) · '
+            f'{len(section_set)} recorded sections{missing}. '
+            'History survives deleting queue rows.')
 
     def set_checks(self, predicate):
         """Apply a predicate to the chapter checkboxes in spine order."""
@@ -2307,11 +2332,11 @@ class Studio(QMainWindow):
         existing = [j for j in self.store.jobs() if j['book_id'] == self.current_book_id]
         occupied = {j['output_name'] for j in existing}
         voice_id = str(fixed_voice) if fixed_voice is not None else None
-        next_part = 1 + sum(j['voice_path'] == voice_id for j in existing)
         folder = self.converter.book_folder(Path(book['path']), fixed_voice)
+        next_part = self.store.next_part_number(self.current_book_id, voice_id, folder)
         for i, numbers in enumerate(parts, next_part):
             span = f'{numbers[0]}-{numbers[-1]}' if len(numbers) > 1 else str(numbers[0])
-            name = f'Part {i:02d} · sections {span}'
+            name = f'Part {i} · sections {span}'
             output_base = part_export_basename(book['title'], i, numbers, occupied, folder)
             occupied.add(output_base)
             # A new part captures the dictionary as it exists NOW. This file is
@@ -2793,7 +2818,13 @@ class Studio(QMainWindow):
                 self.write_log('Export verification failed: M4B missing, too small, or incorrect filename.')
         self.persist_progress(force=True)
         if good:
-            self.store.update_job(job_id, 'complete', self.last_output_path)
+            try:
+                self.store.complete_job(job_id, self.last_output_path)
+            except (OSError, ValueError, Exception) as exc:
+                good = False
+                self.write_log(f'Could not record verified export: {exc}')
+        if good:
+            self.refresh_saved_parts()
             self.chapter_progress.setValue(1000)
             self.overall_progress.setValue(1000)
             self.overall_text.setText('Overall: 100% · Export verified')
@@ -2850,7 +2881,9 @@ class Studio(QMainWindow):
             return
         self.store.remove_job(job_id)
         self.refresh_jobs()
-        self.statusBar().showMessage('Job removed from the queue. Audio files were not deleted.')
+        self.refresh_saved_parts()
+        self.refresh_review()
+        self.statusBar().showMessage('Job removed from queue. Completed-part history and audio were retained.')
 
     def selected_job_output(self):
         """Locate the M4B path associated with the selected job."""
@@ -2939,6 +2972,13 @@ class Studio(QMainWindow):
                 and job['output_path']]
         exports = [(job['name'], Path(job['output_path'])) for job in jobs]
         known = {str(path.resolve()) for _label, path in exports}
+        # Completed-parts ledger is independent of queue cleanup.
+        for part in self.store.completed_parts(book_id):
+            path = Path(part['output_path'])
+            if str(path.resolve()) in known:
+                continue
+            exports.append((f"Part {part['part_number']} · archived", path))
+            known.add(str(path.resolve()))
         # Complete exports are archival files, not queue jobs. Discover them
         # in the same narrator-specific directories as their original parts.
         for manifest_path in manifest_paths:
@@ -2988,9 +3028,11 @@ class Studio(QMainWindow):
             self.converter = conv
             # Each job keeps its original narrator snapshot. Resolve folders
             # with that path instead of the currently selected Generate voice.
-            groups = collect_export_groups(self.store.jobs(), book_id, conv.book_folder)
+            history = [dict(row) for row in self.store.jobs()]
+            history.extend(self.store.recorded_jobs_for_export(book_id))
+            groups = collect_export_groups(history, book_id, conv.book_folder)
             if not groups:
-                raise ValueError('No queue parts exist for this book.')
+                raise ValueError('No completed or queued parts exist for this book.')
             if len(groups) > 1:
                 choices = [f"{voice_name(g['voice_path'])} — "
                            f"{len(g['parts'])} part(s), {len(g['indices'])} sections, "
