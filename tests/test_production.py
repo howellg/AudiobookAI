@@ -112,12 +112,35 @@ class ProductionTests(unittest.TestCase):
         os.utime(older, (past, past))
         count, size = p.cache_summary(90, cache_dir=self.cache)
         self.assertEqual((count, size), (1, 1024))
-        self.assertEqual(p.remove_raw_cache(90, cache_dir=self.cache, expected_count=1), (1, 1024))
-        self.assertFalse(older.exists())
-        for path in (newer, other, external, link):
-            self.assertTrue(path.exists() or path.is_symlink())
-        with self.assertRaises(RuntimeError):
-            p.remove_raw_cache(None, cache_dir=self.cache, expected_count=0)
+        # Test-only cleanup must explicitly treat this isolated folder as
+        # the configured cache; a name starting with "test_" grants no access.
+        with patch.object(p, 'RAW_CACHE', self.cache):
+            self.assertEqual(p.remove_raw_cache(90, cache_dir=self.cache, expected_count=1),
+                             (1, 1024))
+            self.assertFalse(older.exists())
+            for path in (newer, other, external, link):
+                self.assertTrue(path.exists() or path.is_symlink())
+            with self.assertRaises(RuntimeError):
+                p.remove_raw_cache(None, cache_dir=self.cache, expected_count=0)
+
+    def test_test_named_directory_has_no_special_delete_permission(self):
+        # Previously any path basename beginning "test_" passed containment.
+        wav = self.cache / 'keep.wav'
+        wav.write_bytes(b'keep')
+        with self.assertRaisesRegex(ValueError, 'AudiobookAI raw cache'):
+            p.remove_raw_cache(None, cache_dir=self.cache, expected_count=1)
+        self.assertEqual(wav.read_bytes(), b'keep')
+
+    def test_cache_cleanup_supports_external_symlink(self):
+        # Emulate output/narration_cache_v2 -> mounted external SSD.
+        link = self.root / 'linked_cache'
+        link.symlink_to(self.cache, target_is_directory=True)
+        test_wav = self.cache / 'one.wav'
+        test_wav.write_bytes(b'wav-bytes')
+        with patch.object(p, 'RAW_CACHE', link):
+            self.assertEqual(p.remove_raw_cache(None, cache_dir=link, expected_count=1),
+                             (1, len(b'wav-bytes')))
+        self.assertFalse(test_wav.exists())
 
     def test_cleanup_refuses_arbitrary_directory(self):
         """Verify cleanup refuses arbitrary directory behavior."""
