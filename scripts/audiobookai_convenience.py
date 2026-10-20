@@ -53,21 +53,41 @@ def readable_m4b_basename(value: str, length: int = 130) -> str:
     return name[:length].rstrip(' .') or 'audiobook'
 
 
-def part_export_basename(title: str, part: int, indices, occupied=(), folder=None) -> str:
-    """Generate a readable, non-overwriting basename for a newly queued M4B.
+def part_number_from_name(name: str) -> int | None:
+    """Read a part sequence from current and legacy export names.
 
-    Names are reserved against existing SQLite jobs and exported files; when
-    the same selection is deliberately queued again, use a readable (2), (3)
-    suffix instead of a random hash. Already queued jobs aren't renamed.
+    New: `Book - Part(12)`. Older names kept their part number before the
+    EPUB section span, sometimes with an identifying hex suffix.
     """
-    numbers = sorted(set(map(int, indices)))
-    if not numbers:
+    import re
+
+    stem = str(name)
+    if stem.lower().endswith('.m4b'):
+        stem = stem[:-4]
+    patterns = (
+        r' - Part\((\d+)\)(?: \(\d+\))?$',
+        r' - Part (\d+)(?: \(Sections [^)]+\))?(?: \(\d+\))?$',
+        r'[_ -]part_(\d+)_sections_\d+(?:-\d+)?(?:_[a-f0-9]{8,})?$',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, stem, re.I)
+        if match:
+            number = int(match.group(1))
+            return number if number > 0 else None
+    return None
+
+
+def part_export_basename(title: str, part: int, indices, occupied=(), folder=None) -> str:
+    """Create `Book Name - Part(n)` without replacing existing files or jobs.
+
+    The EPUB indices remain in SQLite; pre-existing queued jobs retain their
+    original file names. Intentional duplicate naming uses a (2) suffix.
+    """
+    if not list(indices):
         raise ValueError('Cannot name an empty chapter selection')
-    span = str(numbers[0]) if len(numbers) == 1 else f'{numbers[0]}-{numbers[-1]}'
-    # EPUB section indices are not necessarily numbered story chapters.
-    if numbers[-1] - numbers[0] + 1 != len(numbers):
-        span += f', {len(numbers)} selected'
-    tail = f' - Part {int(part):02d} (Sections {span})'
+    if int(part) < 1:
+        raise ValueError('Part number must be positive')
+    tail = f' - Part({int(part)})'
     reserved = set(occupied)
     for copy in range(1, 10000):
         collision = '' if copy == 1 else f' ({copy})'
@@ -79,7 +99,7 @@ def part_export_basename(title: str, part: int, indices, occupied=(), folder=Non
                                    or (folder / (candidate + '.partial.m4b')).exists()):
             continue
         return candidate
-    raise RuntimeError('Too many exports with the same title and sections')
+    raise RuntimeError('Too many exports with the same title and part number')
 
 
 def job_category(status: str) -> str:
