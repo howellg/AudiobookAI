@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.3**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.4**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -39,18 +39,42 @@ python scripts/audiobook_gui_v2.py
 
 For a fresh clone, follow [INSTALL.md](INSTALL.md) first. You must provide your own DRM-free EPUB and at least one suitable narrator WAV; neither is distributed with this repository.
 
-## Readable M4B part filenames (V2.8.3)
+## Readable M4B part filenames and permanent completion history (V2.8.4)
 
-Newly queued audiobooks use a filename such as
-`A New Player in the Game - Part 09 (Sections 123-137).m4b` rather than
-underscores and a random hash. Part numbers continue per book and narrator
-across queue batches. EPUB **section** numbers are used intentionally because
-they don't always match printed chapter numbers.
+**Newly queued GUI parts** use names such as `A New Player in the Game - Part(9).m4b`.
+The book title and part number are all that appear in the filename. The exact
+EPUB section selection, narrator snapshot, export path, output size and finish
+timestamp are preserved in **`completed_parts`** in
+`output/audiobookai_studio.sqlite3`, independently of the queue.
 
-Files with the same proposed name receive a readable suffix (`(2)`, `(3)`,
-and so on) so existing exports aren't replaced. **Existing queued jobs and
-completed M4Bs keep their original filenames**, preserving snapshots, resume
-records, and output verification.
+A part is recorded **only after** the converter exits successfully and the
+reported output filename and M4B size pass verification. Failed, cancelled,
+partially generated or WAV-only jobs are not marked as completed. The GUI and
+the Qt-free headless runner use the same atomic database operation.
+
+**After a part finishes, you can delete its entry from Queue** to keep the
+queue short. The completed-part record remains, and Generate's **Next unqueued**
+selection skips its EPUB sections. Part numbers continue per book and narrator
+even after completed jobs have been removed. **Review audio** lists completed
+M4Bs from history, and **Export complete audiobook** can still combine the
+original parts after their queue entries have been deleted, provided required
+chapter WAVs and narrator snapshots remain accessible. The Generate page
+also displays the part numbers and saved section count.
+
+The first time an existing book is selected, Studio attempts to recover
+older completed M4Bs whose queue entries were previously removed. It only
+imports unambiguous contiguous section ranges from **old-style filenames**
+and checks FFprobe audio, duration, and one chapter marker per section.
+Ambiguous filenames and incomplete files are **not** silently marked complete.
+
+If a name is already in use, an optional `(2)` suffix prevents overwrites.
+**Existing queued jobs and files keep their old names**, so resume and
+pronunciation snapshots remain stable. A raw command-line conversion not
+started from a saved Studio queue job does not create a completed-part receipt.
+
+Back up the SQLite database alongside pronunciation snapshots when archiving
+work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
+the SQLite database **does** lose the completion history.
 
 ## Typical workflow
 
@@ -124,7 +148,7 @@ The following are **runtime directories**, not part of the GitHub source distrib
 | `voices/` | Your narrator WAVs and hidden voice snapshots |
 | `output/audiobooks/` | Chapter WAVs and finished M4B files |
 | `output/narration_cache_v2/` | Reusable raw speech WAVs |
-| `output/audiobookai_studio.sqlite3` | Local library, queue, and progress |
+| `output/audiobookai_studio.sqlite3` | Local library, queue, permanent completed-parts ledger, and progress |
 | `~/.config/audiobookai/studio_config.json` | Non-secret MySQL configuration |
 
 The default narrator path is `voices/british_narrator.wav`. Other narrator WAVs can be imported through the GUI. Voice recordings and generated audiobooks are deliberately excluded from Git.
