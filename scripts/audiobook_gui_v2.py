@@ -138,7 +138,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.8.4')
+        self.setWindowTitle('AudiobookAI Studio — V2.8.5')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -197,7 +197,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.8.3 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.8.5 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -254,11 +254,12 @@ class Studio(QMainWindow):
             shortcut = QShortcut(QKeySequence(f'Alt+{i+1}'), self)
             shortcut.activated.connect(lambda idx=i: self.change_page(idx))
             self.shortcuts.append(shortcut)
-        # Preserve the existing timer-disable workaround from the uploaded project.
-        # Do not reenable it as a side effect of a documentation-only change.
-        self.monitor = QTimer(self)
-        # # self.monitor.timeout.connect(self.tick)  # crash isolation  # crash isolation
-        self.monitor.start(1000)
+        # Only repaint the elapsed label while generating. The old always-on
+        # monitor timer was disabled during native Qt crash isolation; avoid
+        # restoring its continuous activity when Studio is idle.
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self.tick)
         self.mirror_timer = QTimer(self)
         self.mirror_timer.setSingleShot(True)
         self.mirror_timer.timeout.connect(self.maybe_sync_mysql)
@@ -2647,6 +2648,8 @@ class Studio(QMainWindow):
         self.chapter_text.setText('Preparing chapter plan…')
         self.overall_text.setText('Overall: preparing…')
         self.stat_eta.setText('ETA: calculating')
+        self.stat_elapsed.setText('Elapsed: 0m 00s')
+        self.elapsed_timer.start()
         # Mark the job running before launching, so an unclean GUI exit is recoverable.
         self.store.update_job(job_id, 'running')
         self.refresh_jobs()
@@ -2765,9 +2768,11 @@ class Studio(QMainWindow):
             self._progress_last_values[name] = value
 
     def tick(self):
-        """Refresh elapsed-time text when a conversion is active."""
+        """Refresh the conversion clock once per second, skipping unchanged text."""
         if self.proc is not None and self.started_at is not None:
-            self.stat_elapsed.setText(f'Elapsed: {fmt_seconds(time.monotonic() - self.started_at)}')
+            value = f'Elapsed: {fmt_seconds(time.monotonic() - self.started_at)}'
+            if self.stat_elapsed.text() != value:
+                self.stat_elapsed.setText(value)
 
     def stop_job(self):
         """Request an orderly stop that retains previously completed chunk audio."""
@@ -2810,6 +2815,8 @@ class Studio(QMainWindow):
                     error=f'Converter could not start: {message}' +
                           (f' · Log: {self.active_job_log}' if self.active_job_log else ''))
             failed_process = self.proc
+            self.tick()
+            self.elapsed_timer.stop()
             self.proc = None
             self.active_job_log = None
             self.active_job_id = None
@@ -2866,6 +2873,8 @@ class Studio(QMainWindow):
         self.write_log('Converter exited: ' + ('complete' if good else
             'interrupted' if stopped else f'failed (code {exit_code})'))
         self.active_job_log = None
+        self.tick()
+        self.elapsed_timer.stop()
         self.proc.deleteLater()
         self.proc = None
         self.active_job_id = None

@@ -23,6 +23,8 @@ class FakeWidget:
         self.writes.append(text)
     def setValue(self, value):
         self.writes.append(value)
+    def text(self):
+        return self.writes[-1] if self.writes else ""
 
 
 class GuiStabilityTests(unittest.TestCase):
@@ -77,6 +79,23 @@ class GuiStabilityTests(unittest.TestCase):
         Studio.paint_progress(fake)
         self.assertEqual(len(fake.stat_chunks.writes), 2)
         self.assertEqual(len(fake.chapter_text.writes), 2)
+
+    def test_elapsed_clock_advances_without_redundant_widget_updates(self):
+        from audiobook_gui_v2 import Studio
+        label = FakeWidget()
+        fake = SimpleNamespace(
+            proc=object(), started_at=100.0, stat_elapsed=label)
+        with patch("audiobook_gui_v2.time.monotonic", return_value=100.2):
+            Studio.tick(fake)
+        with patch("audiobook_gui_v2.time.monotonic", return_value=100.8):
+            Studio.tick(fake)
+        with patch("audiobook_gui_v2.time.monotonic", return_value=161.0):
+            Studio.tick(fake)
+        self.assertEqual(label.writes, ["Elapsed: 0m 00s", "Elapsed: 1m 01s"])
+        fake.proc = None
+        with patch("audiobook_gui_v2.time.monotonic", return_value=180.0):
+            Studio.tick(fake)
+        self.assertEqual(len(label.writes), 2)
 
     def test_bursty_chunk_events_do_not_continuously_repaint(self):
         from audiobook_gui_v2 import Studio
