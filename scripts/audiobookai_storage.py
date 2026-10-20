@@ -374,7 +374,7 @@ class Store:
         if book_id is None:
             return self.db.execute(sql + ' ORDER BY completed_parts.id').fetchall()
         return self.db.execute(sql + '''
-            WHERE completed_parts.book_id=? ORDER BY completed_parts.part_number,id''',
+            WHERE completed_parts.book_id=? ORDER BY completed_parts.part_number,completed_parts.id''',
             (book_id,)).fetchall()
 
     def next_part_number(self, book_id, voice_path=None, folder=None):
