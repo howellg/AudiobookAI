@@ -64,7 +64,8 @@ def routine_speech_log(line: str) -> bool:
     return line == "Using cached audio." or bool(_CACHE_OUTPUT.fullmatch(line))
 
 
-def progress_snapshot(plan, done_chunks, current_section, exporting, chunk_durations):
+def progress_snapshot(plan, done_chunks, current_section, exporting, chunk_durations,
+                      recent_chunk_durations=None):
     """Compute bounded progress labels/values without touching any Qt objects."""
     if not plan:
         return {}, None
@@ -86,9 +87,12 @@ def progress_snapshot(plan, done_chunks, current_section, exporting, chunk_durat
             f"Section {current_section}: {section['title']} — "
             f"{cd:,}/{ct:,} chunks ({100 * cd / ct:.1f}%)"
         )
-    if chunk_durations and not exporting:
+    # When provided, recent durations include cache hits and edited takes.
+    # Their pace is observational, not a guarantee that future chunks are cached.
+    # Legacy callers still use generated-only timings to preserve compatibility.
+    samples = recent_chunk_durations if recent_chunk_durations is not None else chunk_durations
+    if not exporting and samples:
         remaining = max(0, total - completed)
-        mean = sum(chunk_durations) / len(chunk_durations)
-        if mean > 0:
-            return result, remaining * mean
+        mean = sum(max(0.001, float(value)) for value in samples) / len(samples)
+        return result, remaining * mean
     return result, None
