@@ -166,10 +166,14 @@ class Store:
         for old in self.db.execute(
             "SELECT * FROM jobs WHERE status='complete' AND output_path IS NOT NULL"
         ).fetchall():
+            # Don't rewrite the original completion timestamp on each launch.
+            if self.db.execute('SELECT 1 FROM completed_parts WHERE source_job_id=?',
+                               (old['id'],)).fetchone():
+                continue
             output = Path(old['output_path'])
             if (output.is_file() and output.suffix.lower() == '.m4b'
                     and output.stem == old['output_name'] and output.stat().st_size > 1024):
-                self._record_completed(old, output)
+                self._record_completed(old, output, recorded_at=old['finished'])
         # A process cannot still be generating after a fresh launch.
         self.db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (now(),))
         self.db.commit()
@@ -313,7 +317,7 @@ class Store:
                         (status, output_path, error, now() if status == 'complete' else None, now(), job_id))
         self.changed()
 
-    def _record_completed(self, job, path):
+    def _record_completed(self, job, path, recorded_at=None):
         """Internal SQL-only insert, called in the same transaction as completion.
 
         A completed export is part of the library's metadata, not the queue.
@@ -338,7 +342,7 @@ class Store:
                 voice_path=excluded.voice_path, finished=excluded.finished,
                 size_bytes=excluded.size_bytes''',
             (job['book_id'], job['id'], part, job['indices'], job['output_name'],
-             str(path), job['voice_path'], now(), path.stat().st_size))
+             str(path), job['voice_path'], recorded_at or now(), path.stat().st_size))
 
     def complete_job(self, job_id, output_path):
         """Atomically mark verified M4B complete AND preserve its part metadata.
