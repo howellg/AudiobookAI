@@ -13,7 +13,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from audiobookai_gui_throttle import progress_snapshot, routine_speech_log
+from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
+                                      chunk_source_log, BufferedGenerationLog)
 
 
 class FakeWidget:
@@ -28,6 +29,107 @@ class FakeWidget:
 
 
 class GuiStabilityTests(unittest.TestCase):
+    def test_chunk_text_classification(self):
+        self.assertTrue(chunk_source_log("173/200: The army approached."))
+        self.assertFalse(chunk_source_log("Generated 5.0s in 8.2s"))
+        self.assertFalse(chunk_source_log("ERROR: generator failed"))
+
+    def test_buffered_log_keeps_compact_and_detailed_history(self):
+        buffer = BufferedGenerationLog(history_limit=20, pending_limit=10)
+        buffer.append("Chapter 172 begun")
+        buffer.append("173/200: The army approached.", detailed=True)
+        buffer.append("Using cached audio.", detailed=True)
+        buffer.append("Chunk 173 complete", detailed=True)
+        buffer.append("A warning remains visible")
+        self.assertEqual(buffer.drain(), "Chapter 172 begun\nA warning remains visible")
+        self.assertEqual(buffer.drain(detailed=True), "")
+        self.assertEqual(buffer.replay(detailed=True).splitlines(),
+                         ["Chapter 172 begun", "173/200: The army approached.",
+                          "Using cached audio.", "Chunk 173 complete",
+                          "A warning remains visible"])
+        self.assertEqual(buffer.replay().splitlines(),
+                         ["Chapter 172 begun", "A warning remains visible"])
+        buffer.clear()
+        self.assertEqual(buffer.replay(detailed=True), "")
+
+    def test_bounded_log_overflow_warns_and_preserves_latest(self):
+        buffer = BufferedGenerationLog(history_limit=4, pending_limit=3)
+        for i in range(10):
+            buffer.append(f"Chunk {i}", detailed=True)
+        result = buffer.drain(detailed=True)
+        self.assertIn("7 older log lines omitted", result)
+        self.assertIn("Chunk 9", result)
+        self.assertNotIn("Chunk 1\n", result)
+        self.assertEqual(buffer.replay(detailed=True).splitlines(),
+                         ["Chunk 6", "Chunk 7", "Chunk 8", "Chunk 9"])
+
+    def test_gui_batches_messages_and_replays_verbose_lines(self):
+        from audiobook_gui_v2 import Studio
+
+        class FakePane:
+            def __init__(self):
+                self.appended = []
+                self.replaced = []
+            def appendPlainText(self, text):
+                self.appended.append(text)
+            def setPlainText(self, text):
+                self.replaced.append(text)
+
+        class FakePreferences:
+            def __init__(self):
+                self.saved = []
+            def setValue(self, key, value):
+                self.saved.append((key, value))
+
+        pane = FakePane()
+        label = FakeWidget()
+        log_buffer = BufferedGenerationLog()
+        fake = SimpleNamespace(
+            generation_logs=log_buffer, proc=object(), logs=pane,
+            active_job_log=None, log_detailed=False,
+            prefs=FakePreferences(), log_mode_button=label)
+        fake.flush_generation_logs = lambda: Studio.flush_generation_logs(fake)
+
+        for i in range(100):
+            Studio.write_log(fake, f"{i}/100: Narration text", gui=False, detailed=True)
+            Studio.write_log(fake, f"chunk {i} complete", gui=False, detailed=True)
+        Studio.write_log(fake, "Chapter progress saved")
+        self.assertEqual(pane.appended, [])
+        Studio.flush_generation_logs(fake)
+        self.assertEqual(pane.appended, ["Chapter progress saved"])
+        Studio.toggle_log_mode(fake)
+        self.assertTrue(fake.log_detailed)
+        self.assertEqual(fake.prefs.saved, [("detailed_generation_log", True)])
+        self.assertIn("99/100: Narration text", pane.replaced[-1])
+        self.assertEqual(label.writes, ["Compact view"])
+        Studio.write_log(fake, "100/100: Ending", gui=False, detailed=True)
+        Studio.flush_generation_logs(fake)
+        self.assertEqual(pane.appended[-1], "100/100: Ending")
+        Studio.toggle_log_mode(fake)
+        self.assertFalse(fake.log_detailed)
+        self.assertNotIn("99/100: Narration text", pane.replaced[-1])
+        self.assertIn("Chapter progress saved", pane.replaced[-1])
+
+    def test_stdout_keeps_numbered_chunks_for_detailed_display(self):
+        from audiobook_gui_v2 import Studio
+
+        class FakeProcess:
+            def readAllStandardOutput(self):
+                return (b"173/200: The army advanced.\nUsing cached audio.\n"
+                        b"Generated 3.00s in 4.00s\nCUDA out of memory\n")
+
+        received = []
+        fake = SimpleNamespace(
+            proc=FakeProcess(), buffer="", diagnostic_lines=deque(maxlen=40),
+            write_log=lambda text, **kwargs: received.append((text, kwargs)))
+        Studio.consume_output(fake)
+        self.assertEqual(fake.buffer, "")
+        self.assertEqual(len(received), 4)
+        self.assertTrue(all(p["detailed"] for _, p in received[:3]))
+        self.assertFalse(received[-1][1]["detailed"])
+        self.assertIn("CUDA out of memory", fake.diagnostic_lines)
+        self.assertNotIn("173/200: The army advanced.", fake.diagnostic_lines)
+
     def test_only_expected_per_chunk_chatter_is_filtered(self):
         self.assertTrue(routine_speech_log("Using cached audio."))
         self.assertTrue(routine_speech_log("Generated 3.25s in 8.11s"))
@@ -106,14 +208,15 @@ class GuiStabilityTests(unittest.TestCase):
             current_chunk=0, current_total=10000, exporting=False,
             chunk_durations=deque(maxlen=40), _last_paint=100.0,
             paint_progress=lambda: calls.append("paint"),
-            persist_progress=lambda force=False: None)
-        with patch("audiobook_gui_v2.time.monotonic", return_value=100.5):
+            persist_progress=lambda force=False: None,
+            write_log=lambda *args, **kwargs: None)
+        with patch("audiobook_gui_v2.time.monotonic", return_value=100.49):
             for n in range(1, 1200):
                 Studio.progress_event(fake, {
                     "event": "chunk_done", "index": 1, "chunk": n,
                     "total": 10000, "seconds": 0.02})
         self.assertEqual(len(calls), 0)
-        with patch("audiobook_gui_v2.time.monotonic", return_value=102.2):
+        with patch("audiobook_gui_v2.time.monotonic", return_value=100.5):
             Studio.progress_event(fake, {
                 "event": "chunk_done", "index": 1, "chunk": 1200,
                 "total": 10000, "seconds": 0.02})

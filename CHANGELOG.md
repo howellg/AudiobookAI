@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.6 — Faster queue refresh and selectable log detail
+
+- Increase Queue progress repaint cadence from 2.0 to **0.5 seconds** for active jobs, while preserving native setter deduplication and throttled SQLite checkpoints.
+- Tick the elapsed clock every 500 ms; display remains formatted in whole seconds to avoid redundant native updates.
+- Add a Compact/Detailed log toggle with remembered preference and bounded history so users can inspect chunk text, cache reuse, duration and explicit completion events while a conversion runs.
+- Batch GUI log output every 500 ms and append it in one Qt call; capture formerly skipped spoken-text chunk lines to persistent per-job diagnostic logs.
+- Preserve original PySide6 6.11.2 workaround, lazy multimedia loading, narration settings, caches, queue state and completed-part receipts.
+- Add pure helper and GUI-method regression tests for buffering, burst behavior, log modes and stdout parsing.
+
+
 ## 2.8.5 — Elapsed conversion clock hotfix
 
 - Restore the elapsed readout beside ETA using a dedicated one-second Qt timer active only during generation.

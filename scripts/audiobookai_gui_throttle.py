@@ -6,8 +6,57 @@ sparingly, but persist every real queue checkpoint regardless of paint rate.
 from __future__ import annotations
 
 import re
+from collections import deque
 
 _CACHE_OUTPUT = re.compile(r"^Generated \d+(?:\.\d+)?s in \d+(?:\.\d+)?s$")
+
+
+_CHUNK_SOURCE = re.compile(r"^\d+/\d+:\s")
+
+
+def chunk_source_log(line: str) -> bool:
+    """Identify the converter's per-chunk spoken-text prefix."""
+    return bool(_CHUNK_SOURCE.match(line))
+
+
+class BufferedGenerationLog:
+    """Keep bounded log history while batching GUI appends every 500 ms.
+
+    'Detailed' events remain available after switching views, even if they
+    were hidden when received. Persistent diagnostic files are independent.
+    """
+
+    def __init__(self, history_limit=10000, pending_limit=5000):
+        self.history = deque(maxlen=history_limit)
+        self.pending = deque(maxlen=pending_limit)
+        self.omitted = 0
+
+    def append(self, message: str, *, detailed=False):
+        entry = (str(message), bool(detailed))
+        self.history.append(entry)
+        if len(self.pending) == self.pending.maxlen:
+            self.omitted += 1
+        self.pending.append(entry)
+
+    def drain(self, detailed=False):
+        entries = list(self.pending)
+        self.pending.clear()
+        omitted, self.omitted = self.omitted, 0
+        lines = [line for line, extra in entries if detailed or not extra]
+        if omitted:
+            lines.insert(0, f"[{omitted:,} older log lines omitted from live view; see job log on disk]")
+        return "\n".join(lines)
+
+    def replay(self, detailed=False):
+        self.pending.clear()
+        self.omitted = 0
+        return "\n".join(line for line, extra in self.history
+                         if detailed or not extra)
+
+    def clear(self):
+        self.history.clear()
+        self.pending.clear()
+        self.omitted = 0
 
 
 def routine_speech_log(line: str) -> bool:

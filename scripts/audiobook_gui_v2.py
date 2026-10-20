@@ -44,7 +44,8 @@ from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import collect_export_groups, verify_export_group
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
-from audiobookai_gui_throttle import progress_snapshot, routine_speech_log
+from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
+                                      chunk_source_log, BufferedGenerationLog)
 from audiobookai_headless import headless_runner_active
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
@@ -138,7 +139,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.8.5')
+        self.setWindowTitle('AudiobookAI Studio — V2.8.6')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -181,6 +182,8 @@ class Studio(QMainWindow):
         self._progress_last_values = {}
         self.active_job_log = None
         self.diagnostic_lines = deque(maxlen=40)
+        self.generation_logs = BufferedGenerationLog()
+        self.log_detailed = self.prefs.value('detailed_generation_log', False, type=bool)
         self.backup_dir = ROOT / 'output' / 'metadata_backups'
         self.diagnostic_dir = ROOT / 'output' / 'diagnostics'
 
@@ -197,7 +200,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.8.5 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.8.6 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -254,12 +257,12 @@ class Studio(QMainWindow):
             shortcut = QShortcut(QKeySequence(f'Alt+{i+1}'), self)
             shortcut.activated.connect(lambda idx=i: self.change_page(idx))
             self.shortcuts.append(shortcut)
-        # Only repaint the elapsed label while generating. The old always-on
-        # monitor timer was disabled during native Qt crash isolation; avoid
-        # restoring its continuous activity when Studio is idle.
+        # A single 500ms timer refreshes elapsed time and batch-renders logs.
+        # It runs only during conversion; unchanged progress labels are skipped.
         self.elapsed_timer = QTimer(self)
-        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.setInterval(500)
         self.elapsed_timer.timeout.connect(self.tick)
+        self.elapsed_timer.timeout.connect(self.flush_generation_logs)
         self.mirror_timer = QTimer(self)
         self.mirror_timer.setSingleShot(True)
         self.mirror_timer.timeout.connect(self.maybe_sync_mysql)
@@ -602,6 +605,11 @@ class Studio(QMainWindow):
         logbar = QHBoxLayout()
         logbar.addWidget(QLabel('Recent generation messages'))
         logbar.addStretch()
+        self.log_mode_button = mk_button(
+            'Compact view' if self.log_detailed else 'Detailed view',
+            self.toggle_log_mode,
+            'Switch between chapter/warning messages and full per-chunk output')
+        logbar.addWidget(self.log_mode_button)
         logbar.addWidget(mk_button('Copy log', self.copy_log))
         logbar.addWidget(mk_button('Clear view', self.clear_log))
         l.addLayout(logbar)
@@ -1998,19 +2006,32 @@ class Studio(QMainWindow):
         QMessageBox.critical(self, title, str(message))
         self.write_log(f'ERROR: {message}')
 
-    def write_log(self, text, *, gui=True):
-        # QPlainTextEdit maintains the scroll position automatically when
-        # appending; avoid retaining a transient QScrollBar wrapper after
-        # appendPlainText() causes internal Qt layout/scrollbar changes.
-        """Append a converter message to the bounded log viewer."""
-        if gui:
-            self.logs.appendPlainText(str(text))
+    def write_log(self, text, *, gui=True, detailed=False):
+        """Queue GUI log text, then independently persist the diagnostic line."""
+        if gui or detailed:
+            self.generation_logs.append(text, detailed=detailed)
+            # Outside a running conversion, keep user actions immediately visible.
+            if self.proc is None:
+                self.flush_generation_logs()
         if self.active_job_log is not None:
             try:
                 append_diagnostic(self.active_job_log, text)
             except OSError:
                 # Diagnostics are best effort, never an interruption to narration.
                 self.active_job_log = None
+
+    def flush_generation_logs(self):
+        """Append pending lines in one Qt call, at most once per timer tick."""
+        pending = self.generation_logs.drain(self.log_detailed)
+        if pending:
+            self.logs.appendPlainText(pending)
+
+    def toggle_log_mode(self):
+        """Switch detailed chunk output on/off without losing session history."""
+        self.log_detailed = not self.log_detailed
+        self.prefs.setValue('detailed_generation_log', self.log_detailed)
+        self.log_mode_button.setText('Compact view' if self.log_detailed else 'Detailed view')
+        self.logs.setPlainText(self.generation_logs.replay(self.log_detailed))
 
     def focus_search(self):
         """Focus the search field belonging to the currently visible page."""
@@ -2105,6 +2126,7 @@ class Studio(QMainWindow):
 
     def copy_log(self):
         """Copy visible generation messages to the clipboard for debugging."""
+        self.flush_generation_logs()
         text = self.logs.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
@@ -2112,6 +2134,7 @@ class Studio(QMainWindow):
 
     def clear_log(self):
         """Clear the displayed log without deleting on-disk audio or job history."""
+        self.generation_logs.clear()
         self.logs.clear()
         self.statusBar().showMessage('Log display cleared. Conversion progress and saved jobs are unchanged.')
 
@@ -2677,17 +2700,14 @@ class Studio(QMainWindow):
                 continue
             if not line or line.startswith('Sampling:') or 'it/s]' in line:
                 continue
-            # Avoid thousands of text lines in the GUI; individual speech chunks
-            # remain visible in terminal logs if the backend is run directly.
-            if re.match(r'^\d+/\d+: ', line):
-                continue
             if 'FutureWarning:' in line or 'sdpa' in line or 'self.gen = func' in line:
                 continue
-            if not routine_speech_log(line):
+            verbose = chunk_source_log(line) or routine_speech_log(line)
+            if not verbose:
                 self.diagnostic_lines.append(line)
-            # Per-chunk chatter goes to the durable disk log, not the Qt text
-            # viewer; warnings and errors remain visible and diagnostic.
-            self.write_log(line, gui=not routine_speech_log(line))
+            # Preserve every chunk's text/cache/timing detail in the on-disk
+            # diagnostic log. Detailed view shows it via batched Qt updates.
+            self.write_log(line, gui=not verbose, detailed=verbose)
 
     def progress_event(self, event):
         """Interpret JSON progress events and update chapter, total, and export state."""
@@ -2709,6 +2729,11 @@ class Studio(QMainWindow):
             self.done_chunks[idx] = max(self.done_chunks.get(idx, 0), self.current_chunk)
             if event.get('seconds') and float(event['seconds']) > 1.0:
                 self.chunk_durations.append(float(event['seconds']))
+            duration = float(event.get('seconds') or 0)
+            source = 'edited take' if event.get('edited') else 'generated/cache'
+            self.write_log(f'Section {idx}: chunk {self.current_chunk}/{self.current_total} '
+                           f'complete · {duration:.1f}s · {source}',
+                           gui=False, detailed=True)
         elif kind == 'chapter_done':
             idx = int(event['index'])
             if idx in self.plan:
@@ -2725,7 +2750,7 @@ class Studio(QMainWindow):
             self.write_log(f"Finished M4B: {self.last_output_path} ({fmt_size(event['size_bytes'])})")
         # Coalesce cached chunk repaint bursts; always paint chapter/export boundaries.
         paint_time = time.monotonic()
-        if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 2.0:
+        if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 0.5:
             self.paint_progress()
             self._last_paint = paint_time
         if kind in ('plan', 'chapter_started', 'chapter_done', 'export_started', 'export_done'):
@@ -2816,6 +2841,7 @@ class Studio(QMainWindow):
                           (f' · Log: {self.active_job_log}' if self.active_job_log else ''))
             failed_process = self.proc
             self.tick()
+            self.flush_generation_logs()
             self.elapsed_timer.stop()
             self.proc = None
             self.active_job_log = None
@@ -2874,6 +2900,7 @@ class Studio(QMainWindow):
             'interrupted' if stopped else f'failed (code {exit_code})'))
         self.active_job_log = None
         self.tick()
+        self.flush_generation_logs()
         self.elapsed_timer.stop()
         self.proc.deleteLater()
         self.proc = None
