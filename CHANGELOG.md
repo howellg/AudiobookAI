@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.8.4 — Compact part filenames and durable completion history
+
+- New exports from Studio's queue use `Book Name - Part(n).m4b`,
+  without EPUB ranges in the actual filename.
+- Save verified successful exports to an independent SQLite `completed_parts`
+  ledger, atomically with job completion, from both GUI and headless conversion.
+- Preserve EPUB section list, part number, narrator, output path, completion
+  date and file size after the queue job is deleted. Never record interrupted
+  or failed parts.
+- Next unqueued skips permanently recorded sections; subsequent part numbers
+  include history and existing on-disk exports even if older jobs were removed.
+- Review audio and complete-book export can access saved parts without
+  retaining dozens of completed queue rows.
+- Recover verified older, unambiguous M4Bs from filenames after an older queue
+  record was removed; require valid audio and chapter count.
+- Include completed-parts metadata in consistent SQLite backups and the
+  optional MySQL mirror. Preserve existing queue names, pronunciation
+  snapshots, narrated WAVs and generated M4Bs.
+
+
 ## 2.8.3 — Readable part M4B filenames
 
 - Name new part exports like `A New Player in the Game - Part 09 (Sections 123-137).m4b`
