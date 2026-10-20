@@ -390,7 +390,6 @@ class MySQLMirrorTests(unittest.TestCase):
             output = Path(temp) / 'part_one.m4b'
             output.write_bytes(b'x' * 2048)
             store.complete_job(completed, output)
-            store.remove_job(completed)
             fake_conn = DummyConnection()
             fake_mysql = types.ModuleType('mysql')
             fake_connector = types.ModuleType('mysql.connector')
@@ -401,6 +400,9 @@ class MySQLMirrorTests(unittest.TestCase):
                 mirror = MySQLMirror(cfg,'testpassword')
                 books, jobs = mirror.sync(store)
                 self.assertEqual((books,jobs),(1,1))
+                store.remove_job(completed)
+                self.assertEqual(mirror.sync(store), (1,0))
+                self.assertEqual(len(store.completed_parts(book)), 1)
                 self.assertTrue(mirror.connected())
                 self.assertEqual(fake_conn.rollbacks,0)
                 self.assertGreaterEqual(fake_conn.commits,2)
