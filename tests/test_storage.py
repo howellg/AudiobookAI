@@ -185,7 +185,13 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(store.job(job))
         self.assertEqual(store.claimed_sections(book), {1, 2})
         self.assertEqual(store.next_part_number(book, folder=self.path.parent), 2)
-        self.assertEqual(len(store.recorded_jobs_for_export(book)), 1)
+        archived = store.recorded_jobs_for_export(book)
+        self.assertEqual(len(archived), 1)
+        from audiobookai_fullbook import collect_export_groups
+        groups = collect_export_groups(archived, book, lambda book_path, voice_path: self.path.parent)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['indices'], [1, 2])
+        self.assertEqual(groups[0]['unfinished'], [])
         with self.assertRaisesRegex(ValueError, 'recorded completed parts'):
             store.delete_book(book)
         store.close()
