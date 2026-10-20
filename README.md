@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.5**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.6**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -17,6 +17,7 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
 - **V2.7 Read Along:** Play completed chapter WAVs with highlighted saved narration chunks, click a chunk to seek, and open its chapter in the existing audio editor, automatically refresh repaired chapters, and resume where you left off. Chunk timing is estimated rather than sample-accurate.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
+- **V2.8.6 half-second progress and detailed logs:** Refresh the Queue progress display and batch GUI log updates every 500 ms. Use **Detailed view** to show every chunk's text, cache use, generation timing and completion; return to **Compact view** for chapter milestones and warnings. Switching views keeps recent session history; all converter chunk text is retained in job diagnostics. The stable PySide6 6.11.2 pin is unchanged.
 - **V2.8.5 elapsed clock:** Update elapsed time once per second only during an active conversion, without restoring the previously disabled always-on Qt monitor.
 - **V2.8.2 GUI stability and headless runner:** Reduce high-frequency Qt UI updates, defer FFmpeg playback initialization, and provide Qt-free overnight queue recovery. **PySide6 is pinned to 6.11.2** following repeatable native crashes on 6.12.0; the downgrade has shown substantially better long-run stability on the developer's machine, although the root cause is not confirmed.
 - **V2.8.1 hotfix:** Reserve new job IDs beyond all existing frozen pronunciation snapshots, even after deleting an old queue part.
@@ -77,6 +78,14 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Queue display modes (V2.8.6)
+
+The Queue page offers a **Detailed view** button above Recent generation messages. In compact mode, the log contains chapter milestones, warnings, errors and export results while chapter/overall progress still updates every **0.5 seconds** when events arrive. Select Detailed view for the individual spoken-text chunks, `Generated … in …` timings, cache reuse lines and chunk-completion notifications. Click **Compact view** to return to a concise log. This display preference is remembered on restart.
+
+Both views buffer incoming messages and append a single batch to the GUI at most every 500 ms, rather than repainting for every chunk. The live log/history is bounded; persistent `output/diagnostics/` job logs retain chunk text and timing details. The **View job log** control opens those diagnostics. The separate SQLite checkpoint cadence remains unchanged. The elapsed clock is still shown in whole seconds but is checked twice a second without redundant label writes.
+
+After updating, finish the current conversion and restart Studio to load new Python code. Pulling a branch while Studio is already running does not reload the GUI.
 
 ## Typical workflow
 
