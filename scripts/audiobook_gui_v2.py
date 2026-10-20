@@ -144,6 +144,7 @@ class Studio(QMainWindow):
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
         self.store = Store(DB_FILE)
         self.store.on_change = self.mark_mysql_dirty
+        self._history_scanned = set()
         self.mysql_cfg = read_config()['mysql']
         self.mysql_password = lookup_password(self.mysql_cfg)
         self.mysql_mirror = None
@@ -2223,6 +2224,25 @@ class Studio(QMainWindow):
         self.prefs.setValue('last_book_id', book_id)
         title, author, self.sections = self.book_cache[book_id]
         self.store.populate_missing_sections(book_id, self.sections)
+        if book_id not in self._history_scanned:
+            # Older releases stored section ranges in M4B names, but deleting
+            # a job erased that map. Import ONLY playable files whose chapter
+            # count verifies their original range; never trust partial exports.
+            book = self.store.book(book_id)
+            base = self.converter.book_folder(Path(book['path']))
+            imported = self.store.recover_legacy_exports(book_id, base)
+            for voice_dir in sorted((base / 'voices').glob('voice_*')):
+                try:
+                    manifest = json.loads((voice_dir / 'manifest.json').read_text(encoding='utf-8'))
+                    voice = manifest.get('voice_path')
+                except (OSError, ValueError):
+                    continue
+                if voice:
+                    imported += self.store.recover_legacy_exports(book_id, voice_dir, voice)
+            self._history_scanned.add(book_id)
+            if imported:
+                self.statusBar().showMessage(
+                    f'Recovered {imported} verified legacy part(s) into permanent history.')
         words = sum(len(s.text.split()) for s in self.sections)
         self.gen_details.setText(f'{title} · {author} · {len(self.sections)} sections · {words:,} words')
         self.refresh_saved_parts()
@@ -2820,7 +2840,7 @@ class Studio(QMainWindow):
         if good:
             try:
                 self.store.complete_job(job_id, self.last_output_path)
-            except (OSError, ValueError, Exception) as exc:
+            except Exception as exc:
                 good = False
                 self.write_log(f'Could not record verified export: {exc}')
         if good:
