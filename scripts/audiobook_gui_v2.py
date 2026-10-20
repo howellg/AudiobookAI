@@ -42,7 +42,8 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import (collect_export_groups, verify_export_group,
-                                  export_coverage, export_coverage_message)
+                                  export_coverage, export_coverage_message,
+                                  compact_section_ranges)
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
@@ -1271,8 +1272,8 @@ class Studio(QMainWindow):
                 coverage = export_coverage(indices, int(book['sections']))
                 if coverage['interior']:
                     coverage_note = (f" · WARNING: {len(coverage['interior'])} interior "
-                                     f"section(s) not selected: "
-                                     f"{export_coverage_message(indices, int(book['sections']))}")
+                                     f"EPUB section(s) missing: "
+                                     f"{compact_section_ranges(coverage['interior'])}")
             self.archive_summary.setText(
                 f"{'Ready for archive' if ready else 'Still generating'} · "
                 f"{len(group['parts'])-len(group['unfinished'])}/{len(group['parts'])} finished parts · "
