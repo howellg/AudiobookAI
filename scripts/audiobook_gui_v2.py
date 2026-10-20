@@ -1230,7 +1230,11 @@ class Studio(QMainWindow):
             try:
                 conv = self.converter or load_converter()
                 self.converter = conv
-                self.archive_groups = collect_export_groups(self.store.jobs(), book_id, conv.book_folder)
+                # Preserve cleared finished jobs via verified permanent receipts,
+                # matching the regular complete-book export's selection.
+                history = [dict(row) for row in self.store.jobs()]
+                history.extend(self.store.recorded_jobs_for_export(book_id))
+                self.archive_groups = collect_export_groups(history, book_id, conv.book_folder)
                 for group in self.archive_groups:
                     self.archive_narrator.addItem(
                         f"{voice_name(group['voice_path'])} — {len(group['parts'])} parts, "
