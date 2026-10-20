@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.8.5 — Elapsed conversion clock hotfix
+
+- Restore the elapsed readout beside ETA using a dedicated one-second Qt timer active only during generation.
+- Stop the timer when generation finishes or launch fails and skip redundant label updates.
+- Correct the sidebar version and add an elapsed-clock regression test.
+
+
 ## 2.8.4 — Compact part filenames and durable completion history
 
 - New exports from Studio's queue use `Book Name - Part(n).m4b`,
