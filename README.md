@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.7**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.8**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -87,6 +87,10 @@ The Queue page offers a **Detailed view** button above Recent generation message
 Both views buffer incoming messages and append a single batch to the GUI at most every 500 ms, rather than repainting for every chunk. The live log/history is bounded; persistent `output/diagnostics/` job logs retain chunk text and timing details. The **View job log** control opens those diagnostics. The separate SQLite checkpoint cadence remains unchanged. The elapsed clock is still shown in whole seconds but is checked twice a second without redundant label writes.
 
 After updating, finish the current conversion and restart Studio to load new Python code. Pulling a branch while Studio is already running does not reload the GUI.
+
+## Cache cleanup and mirror safety (V2.8.8)
+
+Manual raw-cache cleanup is limited to AudiobookAI's configured narration cache, including a symbolic link to an external SSD. A directory called `test_*` elsewhere cannot bypass this check. The tests explicitly substitute an isolated cache root; the actual cache files and current narration settings are not changed. The MySQL worker now validates the complete metadata snapshot (including finished-part receipts) before attempting a mirror update. These changes do not modify Chatterbox, text chunking, audio trimming, or existing WAV/M4B files.
 
 ## Full-book coverage checks (V2.8.7)
 

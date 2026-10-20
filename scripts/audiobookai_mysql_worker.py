@@ -28,8 +28,12 @@ def main():
         req = json.load(sys.stdin)
         password = req['password']
         snapshot = req['snapshot']
-        for key in ('books', 'book_sections', 'jobs'):
-            if not isinstance(snapshot[key], list):
+        # Validate the entire snapshot before opening a MySQL connection.
+        # A malformed payload must not reach the replace-all mirror operation.
+        if not isinstance(snapshot, dict):
+            raise ValueError('Invalid snapshot: expected a dictionary')
+        for key in ('books', 'book_sections', 'jobs', 'completed_parts'):
+            if not isinstance(snapshot.get(key), list):
                 raise ValueError(f'Invalid snapshot: {key}')
         mirror = MySQLMirror(req['cfg'], password)
         try:

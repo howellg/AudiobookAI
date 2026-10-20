@@ -7,12 +7,16 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
+import io
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 from audiobookai_storage import Store, MySQLMirror
+import audiobookai_mysql_worker as worker
 
 
 class CheckingCursor:
@@ -94,6 +98,32 @@ class MySQLSyncParameterTests(unittest.TestCase):
                 self.assertEqual(len(jobs_inserts[0][1][0]), 17)
             finally:
                 db.close()
+
+
+    def test_worker_rejects_snapshot_missing_completed_parts(self):
+        payload = {'password': '', 'cfg': {}, 'snapshot': {
+            'books': [], 'book_sections': [], 'jobs': []}}
+        output = io.StringIO()
+        with patch.object(worker.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+             patch.object(worker.sys, 'stdout', output), \
+             patch.object(worker, 'MySQLMirror') as mirror:
+            result = worker.main()
+        self.assertEqual(result, 1)
+        self.assertIn('Invalid snapshot: completed_parts', json.loads(output.getvalue())['error'])
+        mirror.assert_not_called()
+
+    def test_worker_accepts_complete_empty_snapshot(self):
+        payload = {'password': '', 'cfg': {}, 'snapshot': {
+            'books': [], 'book_sections': [], 'jobs': [], 'completed_parts': []}}
+        output = io.StringIO()
+        with patch.object(worker.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+             patch.object(worker.sys, 'stdout', output), \
+             patch.object(worker, 'MySQLMirror') as mirror:
+            mirror.return_value.sync.return_value = (0, 0)
+            result = worker.main()
+        self.assertEqual(result, 0)
+        self.assertTrue(json.loads(output.getvalue())['ok'])
+        mirror.return_value.disconnect.assert_called_once()
 
 
 if __name__ == '__main__':

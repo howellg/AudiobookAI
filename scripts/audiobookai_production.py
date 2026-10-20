@@ -238,11 +238,11 @@ def cache_summary(older_than_days=None, cache_dir=RAW_CACHE, now=None):
 def remove_raw_cache(older_than_days=None, cache_dir=RAW_CACHE, expected_count=None):
     """Delete previewed eligible raw chunks only after validating the target directory."""
     cache = Path(cache_dir).resolve()
+    # Resolve through the supported cache symlink (including external SSDs).
+    # A path merely named "test_*" must never bypass deletion containment:
+    # tests can temporarily patch RAW_CACHE to their isolated fixture.
     if cache != RAW_CACHE.resolve():
-        # Unit tests may specify an alternate isolated location, never permit
-        # a broad or home directory cleanup by mistake.
-        if not cache.name.startswith('test_'):
-            raise ValueError('Cache deletion is limited to AudiobookAI raw cache')
+        raise ValueError('Cache deletion is limited to AudiobookAI raw cache')
     files = cache_candidates(older_than_days, cache)
     # Refuse deletion if the cache changed since the user previewed it.
     if expected_count is not None and len(files) != expected_count:
