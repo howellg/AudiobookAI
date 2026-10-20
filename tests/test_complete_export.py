@@ -83,6 +83,18 @@ class CompleteExportTests(unittest.TestCase):
             exported = converter.export_m4b(epub, 'Test Book', 'Author', sections, chosen,
                                              folder, 'Test_Book_COMPLETE')
             self.assertTrue(exported.is_file())
+            # A real, playable legacy M4B must be recoverable from disk even
+            # when no matching queue job survived from an earlier release.
+            from audiobookai_storage import Store
+            old_name = 'Test_Book_part_01_sections_3-5_32d13cf858be'
+            old_output = converter.export_m4b(
+                epub, 'Test Book', 'Author', sections, chosen, folder, old_name)
+            history = Store(folder / 'historical_metadata.sqlite3')
+            book_id = history.import_book(epub, 'Test Book', 'Author', sections)
+            self.assertEqual(history.recover_legacy_exports(book_id, folder), 1)
+            self.assertEqual(history.claimed_sections(book_id), {3, 4, 5})
+            self.assertEqual(history.completed_parts(book_id)[0]['output_path'], str(old_output))
+            history.close()
             # A readable queued part basename must survive converter sanitizing
             # unchanged, while legacy _COMPLETE exports remain discoverable.
             friendly = converter.export_m4b(

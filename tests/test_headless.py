@@ -94,6 +94,10 @@ class HeadlessTests(unittest.TestCase):
         self.assertEqual(self.store.job(job_id)["status"], "complete")
         self.assertEqual(self.store.job(job_id)["completed_chunks"], 5)
         self.assertEqual(self.store.job(job_id)["output_path"], str(exported))
+        self.assertEqual(len(self.store.completed_parts(self.book)), 1)
+        self.store.remove_job(job_id)
+        self.assertEqual(self.store.claimed_sections(self.book), {1})
+        self.assertEqual(len(self.store.recorded_jobs_for_export(self.book)), 1)
 
     def test_zero_exit_without_verified_m4b_fails_safely(self):
         job_id = self.add(required=False)
@@ -109,6 +113,7 @@ class HeadlessTests(unittest.TestCase):
         self.assertEqual(self.store.job(job_id)["status"], "failed")
         self.assertEqual(self.store.job(job_id)["completed_chunks"], 3)
         self.assertEqual(self.store.job(job_id)["output_path"], None)
+        self.assertEqual(self.store.completed_parts(self.book), [])
 
     def test_blocks_completed_job_and_bad_chapter_list(self):
         job_id = self.add(required=False)

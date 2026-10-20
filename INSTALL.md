@@ -216,6 +216,33 @@ The five primary pages are **Library**, **Generate**, **Queue**, **Review audio*
 4. Queue and generate that section before processing a full book.
 5. Check the completed chapter WAV and M4B in Review audio.
 
+### Working in small batches and keeping completed parts
+
+New parts are exported as `Book Name - Part(1).m4b`,
+`Book Name - Part(2).m4b`, and so on. After the entire part is
+**successfully exported and verified**, Studio saves a permanent receipt
+in the local SQLite `completed_parts` metadata table. This receipt includes
+the part number, exact EPUB sections, narrator snapshot, output location and
+completion timestamp.
+
+You can **delete a finished part from Queue** without deleting its audio
+or losing its completed history. The Generate page lists saved parts; use
+**Next unqueued** to move on without accidentally re-queueing completed
+sections. The Review audio and full-book export pages also find completed
+parts from these saved records after their queue rows are removed.
+
+Failed or interrupted parts are **not** recorded as completed. Keep their
+queue entries if you want to resume them using cached audio and their
+frozen pronunciation snapshots. Old queue rows retain their original
+filenames; files created before this feature are not renamed. For
+older already-deleted parts, Studio attempts a one-time FFprobe validation of
+old filenames with unambiguous EPUB section ranges; it does not assume a
+missing or damaged M4B was completed.
+
+`output/audiobookai_studio.sqlite3` is the permanent source of truth for
+these receipts: include it in your metadata backups. You do not need to
+keep dozens of **completed queue rows** to preserve part numbering.
+
 **Do not use a 15-chapter overnight queue as your first installation test.** The first run downloads model files and is the best time to check CUDA, voice-file parsing, and chapter boundaries.
 
 ### Optional command-line check
@@ -301,7 +328,7 @@ books/                          Local EPUBs
 voices/                         Narrator WAVs and hidden queued-voice snapshots
 output/audiobooks/              Chapter WAVs and finished M4B files
 output/narration_cache_v2/      Raw WAV speech chunks
-output/audiobookai_studio.sqlite3  SQLite queue and library
+output/audiobookai_studio.sqlite3  SQLite queue, completed parts and library
 ```
 
 To update a Git checkout **without changing the audio/cache folders**:

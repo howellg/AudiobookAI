@@ -167,6 +167,152 @@ class StoreTests(unittest.TestCase):
         finally:
             reopened.close()
 
+    def test_completed_part_receipt_survives_queue_deletion_and_restart(self):
+        """Only a verified finished M4B is archived; the archive survives queue cleanup."""
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'I', 'Text'), Section(2, 'II', 'Text'),
+                                  Section(3, 'III', 'Text')])
+        job = store.add_job(book, 'Part 1', [1, 2], 'Novel - Part(1)')
+        exported = self.path.parent / 'Novel - Part(1).m4b'
+        exported.write_bytes(b'x' * 2048)
+        store.complete_job(job, exported)
+        self.assertEqual(store.job(job)['status'], 'complete')
+        self.assertEqual(len(store.completed_parts(book)), 1)
+        self.assertEqual(json.loads(store.completed_parts(book)[0]['indices']), [1, 2])
+        self.assertEqual(store.completed_parts(book)[0]['part_number'], 1)
+        store.remove_job(job)
+        self.assertIsNone(store.job(job))
+        self.assertEqual(store.claimed_sections(book), {1, 2})
+        self.assertEqual(store.next_part_number(book, folder=self.path.parent), 2)
+        archived = store.recorded_jobs_for_export(book)
+        self.assertEqual(len(archived), 1)
+        from audiobookai_fullbook import collect_export_groups
+        groups = collect_export_groups(archived, book, lambda book_path, voice_path: self.path.parent)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['indices'], [1, 2])
+        self.assertEqual(groups[0]['unfinished'], [])
+        with self.assertRaisesRegex(ValueError, 'recorded completed parts'):
+            store.delete_book(book)
+        store.close()
+
+        reopened = Store(self.path)
+        self.assertEqual(reopened.claimed_sections(book), {1, 2})
+        self.assertEqual(reopened.completed_parts(book)[0]['output_path'], str(exported))
+        self.assertEqual(len(reopened.snapshot()['completed_parts']), 1)
+        reopened.close()
+
+    def test_clear_finished_queue_only_when_archived(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        finished = store.add_job(book, 'Part 1', [1], 'Novel - Part(1)')
+        legacy_unverified = store.add_job(book, 'Legacy', [1], 'legacy_missing')
+        pending = store.add_job(book, 'Pending', [1], 'Novel - Part(2)')
+        output = self.path.parent / 'Novel - Part(1).m4b'
+        output.write_bytes(b'x' * 2048)
+        store.complete_job(finished, output)
+        store.update_job(legacy_unverified, 'complete', str(self.path.parent / 'missing.m4b'))
+        self.assertEqual(store.prune_recorded_jobs(), 1)
+        self.assertIsNone(store.job(finished))
+        self.assertIsNotNone(store.job(legacy_unverified))
+        self.assertIsNotNone(store.job(pending))
+        self.assertEqual(len(store.completed_parts(book)), 1)
+        self.assertTrue(output.is_file())
+        self.assertEqual(store.prune_recorded_jobs(), 0)
+        store.close()
+
+    def test_failed_or_missing_m4b_is_never_recorded(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        job = store.add_job(book, 'Part 1', [1], 'Novel - Part(1)')
+        partial = self.path.parent / 'Novel - Part(1).partial.m4b'
+        partial.write_bytes(b'x' * 2048)
+        with self.assertRaises(ValueError):
+            store.complete_job(job, partial)
+        with self.assertRaises(ValueError):
+            store.complete_job(job, self.path.parent / 'Novel - Part(1).m4b')
+        self.assertEqual(store.job(job)['status'], 'queued')
+        self.assertEqual(store.completed_parts(book), [])
+        store.update_job(job, 'failed')
+        store.remove_job(job)
+        self.assertFalse(store.claimed_sections(book))
+        self.assertEqual(store.next_part_number(book), 1)
+        store.close()
+
+    def test_backfill_only_existing_finished_outputs_and_keep_legacy_names(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text'), Section(2, 'Chapter', 'Text')])
+        job1 = store.add_job(book, 'Part 1', [1],
+                             'Novel_part_01_sections_1_32d13cf858be')
+        job2 = store.add_job(book, 'Part 2', [2], 'Novel - Part 02 (Sections 2)')
+        output = self.path.parent / (store.job(job1)['output_name'] + '.m4b')
+        output.write_bytes(b'x' * 2048)
+        store.update_job(job1, 'complete', str(output))
+        store.update_job(job2, 'complete', str(self.path.parent / 'missing.m4b'))
+        self.assertEqual(store.completed_parts(book), [])
+        store.close()
+        reopened = Store(self.path)
+        self.assertEqual(len(reopened.completed_parts(book)), 1)
+        self.assertEqual(reopened.completed_parts(book)[0]['part_number'], 1)
+        self.assertEqual(reopened.claimed_sections(book), {1, 2})  # active completed job 2
+        reopened.remove_job(job2)
+        self.assertEqual(reopened.claimed_sections(book), {1})  # missing file not recorded
+        reopened.close()
+
+    def test_part_number_survives_deleted_legacy_jobs_via_disk(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        old = self.path.parent / 'A_New_Player_in_the_Game_part_09_sections_123-137_32d13cf858be.m4b'
+        old.write_bytes(b'x' * 2048)
+        self.assertEqual(store.next_part_number(book, folder=self.path.parent), 10)
+        self.assertEqual(store.completed_parts(book), [])
+        store.close()
+
+    def test_recover_valid_legacy_part_missing_queue_row_only(self):
+        """Import old completed part files with a verified stream and all chapters."""
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(i, f'Chapter {i}', 'Text') for i in range(1, 5)])
+        export = self.path.parent / 'Novel_part_01_sections_1-3_32d13cf858be.m4b'
+        export.write_bytes(b'f' * 2048)
+        fake_info = {'streams': [{'codec_name': 'aac'}], 'format': {'duration': '120'},
+                     'chapters': [{}, {}, {}]}
+        with patch('subprocess.run') as probe:
+            probe.return_value.stdout = json.dumps(fake_info)
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 1)
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+        receipt = store.completed_parts(book)[0]
+        self.assertEqual(json.loads(receipt['indices']), [1, 2, 3])
+        self.assertEqual(receipt['part_number'], 1)
+        self.assertIsNone(receipt['source_job_id'])
+        self.assertEqual(store.claimed_sections(book), {1, 2, 3})
+        self.assertEqual(store.next_part_number(book), 2)
+        store.close()
+
+    def test_recovery_skips_truncated_legacy_part_and_active_queue_exports(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(i, f'Chapter {i}', 'Text') for i in range(1, 5)])
+        filename = 'Novel_part_01_sections_1-3_32d13cf858be'
+        export = self.path.parent / (filename + '.m4b')
+        export.write_bytes(b'f' * 2048)
+        with patch('subprocess.run') as probe:
+            probe.return_value.stdout = json.dumps({
+                'streams': [{'codec_name': 'aac'}], 'format': {'duration': '120'},
+                'chapters': [{}]})  # Only one chapter, but three are expected
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+        self.assertEqual(store.completed_parts(book), [])
+        job = store.add_job(book, 'Part 1', [1, 2, 3], filename)
+        with patch('subprocess.run') as probe:
+            self.assertEqual(store.recover_legacy_exports(book, self.path.parent), 0)
+            probe.assert_not_called()  # Existing queue still owns this export.
+        store.remove_job(job)
+        store.close()
+
     def test_backfill_existing_sections(self):
         """Verify backfill existing sections behavior."""
         store = Store(self.path)
@@ -240,7 +386,10 @@ class MySQLMirrorTests(unittest.TestCase):
             store = Store(Path(temp)/'local.sqlite3')
             book = store.import_book('/tmp/a.epub','Title','Author',
                 [Section(1,'Chapter I','Once upon a time')])
-            store.add_job(book,'Part 01',[1],'part_one')
+            completed = store.add_job(book,'Part 01',[1],'part_one')
+            output = Path(temp) / 'part_one.m4b'
+            output.write_bytes(b'x' * 2048)
+            store.complete_job(completed, output)
             fake_conn = DummyConnection()
             fake_mysql = types.ModuleType('mysql')
             fake_connector = types.ModuleType('mysql.connector')
@@ -251,13 +400,16 @@ class MySQLMirrorTests(unittest.TestCase):
                 mirror = MySQLMirror(cfg,'testpassword')
                 books, jobs = mirror.sync(store)
                 self.assertEqual((books,jobs),(1,1))
+                store.remove_job(completed)
+                self.assertEqual(mirror.sync(store), (1,0))
+                self.assertEqual(len(store.completed_parts(book)), 1)
                 self.assertTrue(mirror.connected())
                 self.assertEqual(fake_conn.rollbacks,0)
                 self.assertGreaterEqual(fake_conn.commits,2)
                 joined = '\n'.join(q for q,_ in fake_conn.statements)
-                for table in ('books','book_sections','jobs','sync_state'):
+                for table in ('books','book_sections','jobs','completed_parts','sync_state'):
                     self.assertIn('CREATE TABLE IF NOT EXISTS '+table,joined)
-                self.assertIn('INSERT INTO jobs',joined)
+                self.assertIn('INSERT INTO completed_parts',joined)
                 self.assertIn('DELETE FROM books',joined)
                 # The replica contains SQL metadata; it doesn't store audio blobs.
                 self.assertNotIn('LONGBLOB',joined)

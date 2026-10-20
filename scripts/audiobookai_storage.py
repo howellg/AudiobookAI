@@ -87,6 +87,9 @@ def save_password(cfg, password):
     keyring.set_password(KEYRING_SERVICE, credential_name(cfg), password)
 
 
+from audiobookai_convenience import part_number_from_name, legacy_part_selection
+
+
 class Store:
     """SQLite canonical store, backwards-compatible with V2's jobs/books."""
 
@@ -115,6 +118,22 @@ class Store:
             output_path TEXT, error TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
+        -- Verified completed exports survive deletion of their transient queue rows.
+        -- source_job_id deliberately has no FK to jobs.
+        CREATE TABLE IF NOT EXISTS completed_parts (
+            id INTEGER PRIMARY KEY,
+            book_id INTEGER NOT NULL REFERENCES books(id),
+            source_job_id INTEGER UNIQUE,
+            part_number INTEGER NOT NULL,
+            indices TEXT NOT NULL,
+            output_name TEXT NOT NULL,
+            output_path TEXT NOT NULL UNIQUE,
+            voice_path TEXT,
+            finished TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_completed_parts_book
+            ON completed_parts(book_id, part_number);
         -- Unlike SQLite INTEGER PRIMARY KEY, this durable high-water mark
         -- survives removal of the last job (and restoration of older queues).
         CREATE TABLE IF NOT EXISTS job_id_sequence (
@@ -142,6 +161,19 @@ class Store:
         for field, column_sql in new_columns.items():
             if field not in cols:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {field} {column_sql}')
+        # Preserve verified exports from earlier versions in the permanent ledger.
+        # Missing outputs and partially completed rows are NOT promoted.
+        for old in self.db.execute(
+            "SELECT * FROM jobs WHERE status='complete' AND output_path IS NOT NULL"
+        ).fetchall():
+            # Don't rewrite the original completion timestamp on each launch.
+            if self.db.execute('SELECT 1 FROM completed_parts WHERE source_job_id=?',
+                               (old['id'],)).fetchone():
+                continue
+            output = Path(old['output_path'])
+            if (output.is_file() and output.suffix.lower() == '.m4b'
+                    and output.stem == old['output_name'] and output.stat().st_size > 1024):
+                self._record_completed(old, output, recorded_at=old['finished'])
         # A process cannot still be generating after a fresh launch.
         self.db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (now(),))
         self.db.commit()
@@ -196,6 +228,9 @@ class Store:
         """Remove an unused book while refusing to orphan queue records."""
         if self.db.execute('SELECT COUNT(*) FROM jobs WHERE book_id=?', (book_id,)).fetchone()[0]:
             raise ValueError('This book has queued or completed jobs. Remove its jobs first.')
+        if self.db.execute('SELECT COUNT(*) FROM completed_parts WHERE book_id=?',
+                           (book_id,)).fetchone()[0]:
+            raise ValueError('This book has recorded completed parts. Keep its library entry to preserve their history.')
         self.db.execute('DELETE FROM books WHERE id=?', (book_id,))
         self.changed()
 
@@ -282,6 +317,158 @@ class Store:
                         (status, output_path, error, now() if status == 'complete' else None, now(), job_id))
         self.changed()
 
+    def _record_completed(self, job, path, recorded_at=None):
+        """Internal SQL-only insert, called in the same transaction as completion.
+
+        A completed export is part of the library's metadata, not the queue.
+        Existing jobs may be removed without erasing this receipt.
+        """
+        part = part_number_from_name(job['output_name'])
+        if part is None:
+            part = part_number_from_name(job['name'])
+        if part is None:
+            found = self.db.execute('''SELECT COALESCE(MAX(part_number),0) FROM completed_parts
+                WHERE book_id=? AND COALESCE(voice_path,'')=?''',
+                (job['book_id'], job['voice_path'] or '')).fetchone()[0]
+            part = found + 1
+        self.db.execute('''INSERT INTO completed_parts
+            (book_id,source_job_id,part_number,indices,output_name,output_path,
+             voice_path,finished,size_bytes)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(output_path) DO UPDATE SET
+                source_job_id=excluded.source_job_id,
+                part_number=excluded.part_number,
+                indices=excluded.indices, output_name=excluded.output_name,
+                voice_path=excluded.voice_path, finished=excluded.finished,
+                size_bytes=excluded.size_bytes''',
+            (job['book_id'], job['id'], part, job['indices'], job['output_name'],
+             str(path), job['voice_path'], recorded_at or now(), path.stat().st_size))
+
+    def complete_job(self, job_id, output_path):
+        """Atomically mark verified M4B complete AND preserve its part metadata.
+
+        The caller must already have checked the converter exited cleanly and
+        reported the expected export. No receipt exists for failed/partial work.
+        """
+        job = self.job(job_id)
+        if job is None:
+            raise ValueError(f'Unknown job #{job_id}')
+        path = Path(output_path)
+        if (not path.is_file() or path.suffix.lower() != '.m4b'
+                or path.name != job['output_name'] + '.m4b'
+                or path.stat().st_size <= 1024):
+            raise ValueError('Cannot archive a missing, partial or mismatched M4B')
+        if not self.db.in_transaction:
+            self.db.execute('BEGIN IMMEDIATE')
+        try:
+            self._record_completed(job, path)
+            self.db.execute('''UPDATE jobs SET status='complete',output_path=?,
+                error='',finished=?,updated=? WHERE id=?''',
+                (str(path), now(), now(), job_id))
+            self.changed()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def completed_parts(self, book_id=None):
+        """Permanent export receipts, including parts removed from the queue."""
+        sql = '''SELECT completed_parts.*,books.title AS book_title,
+                 books.path AS book_path FROM completed_parts
+                 JOIN books ON books.id=completed_parts.book_id'''
+        if book_id is None:
+            return self.db.execute(sql + ' ORDER BY completed_parts.id').fetchall()
+        return self.db.execute(sql + '''
+            WHERE completed_parts.book_id=? ORDER BY completed_parts.part_number,completed_parts.id''',
+            (book_id,)).fetchall()
+
+    def next_part_number(self, book_id, voice_path=None, folder=None):
+        """Allocate after archived, queued and on-disk parts (including deleted jobs)."""
+        voice = str(voice_path) if voice_path else ''
+        maximum = self.db.execute('''SELECT COALESCE(MAX(part_number),0)
+            FROM completed_parts WHERE book_id=? AND COALESCE(voice_path,'')=?''',
+            (book_id, voice)).fetchone()[0]
+        for row in self.db.execute('''SELECT output_name,name FROM jobs
+                WHERE book_id=? AND COALESCE(voice_path,'')=?''',
+                (book_id, voice)):
+            part = part_number_from_name(row['output_name']) or part_number_from_name(row['name'])
+            if part:
+                maximum = max(maximum, part)
+        if folder is not None and Path(folder).is_dir():
+            for output in Path(folder).glob('*.m4b'):
+                part = part_number_from_name(output.stem)
+                if part:
+                    maximum = max(maximum, part)
+        return maximum + 1
+
+    def recover_legacy_exports(self, book_id, folder, voice_path=None):
+        """Import *verifiable* legacy completed files whose queue row was erased.
+
+        Older versions encoded contiguous section ranges in their filenames.
+        A valid duration/audio stream and one chapter marker per expected
+        section are required before recording a finished part. Do not import
+        ambiguous ranges, partial files or names reserved by current jobs.
+        """
+        import subprocess
+
+        root = Path(folder)
+        if not root.is_dir():
+            return 0
+        book = self.book(book_id)
+        if book is None:
+            return 0
+        reserved = {row['output_name'] for row in self.db.execute(
+            'SELECT output_name FROM jobs WHERE book_id=?', (book_id,))}
+        recorded = {row['output_path'] for row in self.db.execute(
+            'SELECT output_path FROM completed_parts WHERE book_id=?', (book_id,))}
+        recovered = 0
+        for output in sorted(root.glob('*.m4b')):
+            selection = legacy_part_selection(output.stem)
+            if not selection or output.stem in reserved or str(output) in recorded:
+                continue
+            number, indices = selection
+            if indices[-1] > int(book['sections']) or output.stat().st_size <= 1024:
+                continue
+            try:
+                probe = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                     '-show_entries', 'stream=codec_name:format=duration:chapter=start_time,end_time',
+                     '-of', 'json', str(output)],
+                    capture_output=True, text=True, check=True, timeout=30)
+                info = json.loads(probe.stdout)
+                valid = (bool(info.get('streams'))
+                         and float(info.get('format', {}).get('duration') or 0) > 0
+                         and len(info.get('chapters', [])) == len(indices))
+            except (OSError, ValueError, TypeError, subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired):
+                valid = False
+            if not valid:
+                continue
+            self._record_completed({
+                'id': None, 'book_id': book_id, 'name': output.stem,
+                'indices': json.dumps(indices), 'output_name': output.stem,
+                'voice_path': str(voice_path) if voice_path else None,
+            }, output)
+            recorded.add(str(output))
+            recovered += 1
+        if recovered:
+            self.changed()
+        return recovered
+
+    def recorded_jobs_for_export(self, book_id):
+        """Synthetic complete jobs for parts whose transient queue row was deleted."""
+        current = {row['id'] for row in self.db.execute(
+            'SELECT id FROM jobs WHERE book_id=?', (book_id,))}
+        result = []
+        for receipt in self.completed_parts(book_id):
+            if receipt['source_job_id'] in current:
+                continue
+            result.append({
+                'id': f"saved-{receipt['id']}", 'book_id': book_id,
+                'book_path': receipt['book_path'], 'voice_path': receipt['voice_path'],
+                'status': 'complete', 'indices': receipt['indices'],
+            })
+        return result
+
     def requeue_interrupted(self, job_ids):
         """Requeue approved interrupted jobs only; retain progress and cached audio.
 
@@ -314,18 +501,34 @@ class Store:
         self.db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
         self.changed()
 
+    def prune_recorded_jobs(self):
+        """Clear only completed queue rows already backed by permanent receipts.
+
+        This never deletes historical rows, audio, cached WAVs, or pronunciation
+        snapshots. An old completed job with no validated receipt is retained.
+        """
+        cur = self.db.execute('''DELETE FROM jobs WHERE status='complete' AND id IN (
+            SELECT source_job_id FROM completed_parts WHERE source_job_id IS NOT NULL
+        )''')
+        count = cur.rowcount
+        if count:
+            self.changed()
+        return count
+
     def claimed_sections(self, book_id):
         """Find sections already covered by queued, running, or complete jobs."""
-        rows = self.db.execute("SELECT indices FROM jobs WHERE book_id=? AND status IN ('queued','running','complete')",
-                               (book_id,)).fetchall()
+        rows = list(self.db.execute("SELECT indices FROM jobs WHERE book_id=? AND status IN ('queued','running','complete')",
+                               (book_id,)).fetchall())
+        rows.extend(self.db.execute('SELECT indices FROM completed_parts WHERE book_id=?',
+                                    (book_id,)).fetchall())
         return {int(i) for row in rows for i in json.loads(row['indices'])}
 
     def snapshot(self):
         """Consistent, small metadata snapshot; no EPUB or audio data copied."""
-        # All three tables must describe the same point in time for mirror sync.
+        # Include the permanent receipts in the same consistent metadata snapshot.
         self.db.execute('BEGIN')
         try:
-            tables = ('books', 'book_sections', 'jobs')
+            tables = ('books', 'book_sections', 'jobs', 'completed_parts')
             result = {table: [dict(r) for r in self.db.execute(f'SELECT * FROM {table}').fetchall()]
                       for table in tables}
             self.db.commit()
@@ -401,6 +604,20 @@ class MySQLMirror:
                     INDEX idx_jobs_status (status,id),
                     FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+                '''CREATE TABLE IF NOT EXISTS completed_parts (
+                    id BIGINT PRIMARY KEY,
+                    book_id BIGINT NOT NULL,
+                    source_job_id BIGINT NULL,
+                    part_number INT NOT NULL,
+                    indices_json JSON NOT NULL,
+                    output_name TEXT NOT NULL,
+                    output_path LONGTEXT NOT NULL,
+                    voice_path LONGTEXT NULL,
+                    finished DATETIME NOT NULL,
+                    size_bytes BIGINT NOT NULL,
+                    INDEX idx_completed_parts_book (book_id,part_number),
+                    FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
                 '''CREATE TABLE IF NOT EXISTS sync_state (
                     source_name VARCHAR(100) PRIMARY KEY,
                     synced_at DATETIME NOT NULL,
@@ -438,12 +655,14 @@ class MySQLMirror:
             # Replace all rows in one transaction: readers see either the old
             # complete snapshot or the new one. All tables belong only to this
             # local application's MySQL mirror.
+            cur.execute('DELETE FROM completed_parts')
             cur.execute('DELETE FROM jobs')
             cur.execute('DELETE FROM book_sections')
             cur.execute('DELETE FROM books')
             books = snapshot['books']
             sections = snapshot['book_sections']
             jobs = snapshot['jobs']
+            completed_parts = snapshot['completed_parts']
             if books:
                 cur.executemany('''INSERT INTO books
                     (id,path,path_sha256,title,author,sections,words,added)
@@ -465,6 +684,14 @@ class MySQLMirror:
                       j['added'],j['finished'],j['output_path'],j['error'],j['total_chunks'],
                       j['completed_chunks'],j['current_section'],j['current_chunk'],
                       j['current_total'],j['updated'],j.get('voice_path')) for j in jobs])
+            if completed_parts:
+                cur.executemany('''INSERT INTO completed_parts
+                    (id,book_id,source_job_id,part_number,indices_json,output_name,
+                     output_path,voice_path,finished,size_bytes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    [(p['id'],p['book_id'],p['source_job_id'],p['part_number'],
+                      p['indices'],p['output_name'],p['output_path'],p['voice_path'],
+                      p['finished'],p['size_bytes']) for p in completed_parts])
             cur.execute('''INSERT INTO sync_state(source_name,synced_at,book_count,job_count)
                            VALUES (%s, %s, %s, %s)
                            ON DUPLICATE KEY UPDATE synced_at=VALUES(synced_at),

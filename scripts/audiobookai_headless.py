@@ -249,8 +249,13 @@ def run_job(store, job_id, *, process_factory=subprocess.Popen, verbose=False):
     if (returncode == 0 and exported and exported.is_file()
             and exported.suffix.lower() == ".m4b"
             and exported.stem == job["output_name"] and exported.stat().st_size > 1024):
-        store.update_job(job_id, "complete", output_path=str(exported))
-        print(f"Job #{job_id} complete: {exported}", flush=True)
+        try:
+            store.complete_job(job_id, exported)
+        except (OSError, ValueError) as exc:
+            store.update_job(job_id, "failed", error=f"Could not record completed part: {exc}")
+            print(f"Job #{job_id} failed to save completion: {exc}", file=sys.stderr, flush=True)
+            return 1
+        print(f"Job #{job_id} complete and archived in metadata: {exported}", flush=True)
         return 0
     hint = diagnostic_hint(recent, returncode)
     if returncode == 0:
