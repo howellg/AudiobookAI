@@ -547,6 +547,8 @@ class Studio(QMainWindow):
         additional.addWidget(mk_button('Open folder', self.open_selected_output_folder))
         additional.addWidget(mk_button('Copy path', self.copy_selected_output_path))
         additional.addWidget(mk_button('View job log', self.open_selected_diagnostic))
+        additional.addWidget(mk_button('Clear finished jobs', self.clear_finished_jobs,
+            'Remove verified completed entries from queue; keep files and permanent history'))
         additional.addStretch()
         l.addLayout(additional)
         filters = QHBoxLayout()
@@ -2904,6 +2906,30 @@ class Studio(QMainWindow):
         self.refresh_saved_parts()
         self.refresh_review()
         self.statusBar().showMessage('Job removed from queue. Completed-part history and audio were retained.')
+
+    def clear_finished_jobs(self):
+        """Keep the queue compact without losing permanent verified-part metadata."""
+        eligible = [row for row in self.store.jobs()
+                    if row['status'] == 'complete' and
+                    any(part['source_job_id'] == row['id']
+                        for part in self.store.completed_parts(row['book_id']))]
+        if not eligible:
+            QMessageBox.information(self, 'No finished jobs to clear',
+                'There are no verified, permanently recorded completed jobs to remove.')
+            return
+        answer = QMessageBox.question(self, 'Clear finished jobs?',
+            f'Remove {len(eligible)} completed job(s) from Queue?\n\n'
+            'Recorded part history, completed M4Bs, chapter WAVs, caches, '
+            'and pronunciation snapshots will all be kept.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        count = self.store.prune_recorded_jobs()
+        self.refresh_jobs()
+        self.refresh_review()
+        self.refresh_saved_parts()
+        self.statusBar().showMessage(
+            f'Cleared {count} completed queue job(s); permanent history and audio retained.')
 
     def selected_job_output(self):
         """Locate the M4B path associated with the selected job."""
