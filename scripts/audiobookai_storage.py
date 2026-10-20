@@ -501,6 +501,20 @@ class Store:
         self.db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
         self.changed()
 
+    def prune_recorded_jobs(self):
+        """Clear only completed queue rows already backed by permanent receipts.
+
+        This never deletes historical rows, audio, cached WAVs, or pronunciation
+        snapshots. An old completed job with no validated receipt is retained.
+        """
+        cur = self.db.execute('''DELETE FROM jobs WHERE status='complete' AND id IN (
+            SELECT source_job_id FROM completed_parts WHERE source_job_id IS NOT NULL
+        )''')
+        count = cur.rowcount
+        if count:
+            self.changed()
+        return count
+
     def claimed_sections(self, book_id):
         """Find sections already covered by queued, running, or complete jobs."""
         rows = list(self.db.execute("SELECT indices FROM jobs WHERE book_id=? AND status IN ('queued','running','complete')",
