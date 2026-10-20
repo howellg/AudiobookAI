@@ -52,7 +52,8 @@ reported output filename and M4B size pass verification. Failed, cancelled,
 partially generated or WAV-only jobs are not marked as completed. The GUI and
 the Qt-free headless runner use the same atomic database operation.
 
-**After a part finishes, you can delete its entry from Queue** to keep the
+**After a part finishes, use Queue → Clear finished jobs** to remove all
+verified completed entries, or delete individual entries to keep the
 queue short. The completed-part record remains, and Generate's **Next unqueued**
 selection skips its EPUB sections. Part numbers continue per book and narrator
 even after completed jobs have been removed. **Review audio** lists completed
