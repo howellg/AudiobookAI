@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.8.8 — Cache cleanup path safety and MySQL snapshot validation
+
+- Enforce raw-cache deletion containment against the configured AudiobookAI cache path; no longer accept arbitrary directories merely because their names begin with `test_`.
+- Continue supporting raw-cache symlinks to mounted external SSDs through safe resolved-path comparison.
+- Reject incomplete MySQL sync payloads that omit the permanent `completed_parts` ledger before the worker creates a database connection.
+- Add tests for arbitrary test-named directory rejection, external symlink cleanup support, and valid/invalid MySQL worker requests.
+- Keep narration splitting, pauses, GPU inference, output formats, cache contents and PySide6 6.11.2 unchanged.
+
+
 ## 2.8.7 — Third-party review fixes and export completeness warnings
 
 - Clear Generate's selected EPUB/chapter state on a missing or unloadable source file, even if the previous sections are cached in memory.
