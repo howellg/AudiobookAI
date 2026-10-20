@@ -77,6 +77,103 @@ def part_number_from_name(name: str) -> int | None:
     return None
 
 
+def legacy_part_selection(name: str) -> tuple[int, list[int]] | None:
+    """Recover exact contiguous section ranges from OLD part filenames only.
+
+    New filenames have no section span; their selections must come from the
+    permanent SQLite receipt. Ambiguous old noncontiguous ranges are skipped.
+    """
+    stem = str(name)
+    if stem.lower().endswith('.m4b'):
+        stem = stem[:-4]
+    patterns = (
+        r' - Part (\d+) \(Sections (\d+)(?:-(\d+))?\)(?: \(\d+\))?title: str, part: int, indices, occupied=(), folder=None) -> str:
+    """Create `Book Name - Part(n)` without replacing existing files or jobs.
+
+    The EPUB indices remain in SQLite; pre-existing queued jobs retain their
+    original file names. Intentional duplicate naming uses a (2) suffix.
+    """
+    if not list(indices):
+        raise ValueError('Cannot name an empty chapter selection')
+    if int(part) < 1:
+        raise ValueError('Part number must be positive')
+    tail = f' - Part({int(part)})'
+    reserved = set(occupied)
+    for copy in range(1, 10000):
+        collision = '' if copy == 1 else f' ({copy})'
+        prefix = readable_m4b_basename(title, max(1, 130 - len(tail) - len(collision)))
+        candidate = prefix + tail + collision
+        if candidate in reserved:
+            continue
+        if folder is not None and ((folder / (candidate + '.m4b')).exists()
+                                   or (folder / (candidate + '.partial.m4b')).exists()):
+            continue
+        return candidate
+    raise RuntimeError('Too many exports with the same title and part number')
+
+
+def job_category(status: str) -> str:
+    """A small stable set of queue filter groups."""
+    if status in {'queued', 'running', 'stopping'}:
+        return 'Pending / active'
+    if status == 'complete':
+        return 'Completed'
+    return 'Needs attention'
+
+
+def estimate_audio_duration(words: int, words_per_minute: int = 130) -> float:
+    """Audio estimate in seconds (not compute/processing time)."""
+    return max(0, words) * 60 / words_per_minute
+,
+        r'_part_(\d+)_sections_(\d+)(?:-(\d+))?_[a-f0-9]{8,}title: str, part: int, indices, occupied=(), folder=None) -> str:
+    """Create `Book Name - Part(n)` without replacing existing files or jobs.
+
+    The EPUB indices remain in SQLite; pre-existing queued jobs retain their
+    original file names. Intentional duplicate naming uses a (2) suffix.
+    """
+    if not list(indices):
+        raise ValueError('Cannot name an empty chapter selection')
+    if int(part) < 1:
+        raise ValueError('Part number must be positive')
+    tail = f' - Part({int(part)})'
+    reserved = set(occupied)
+    for copy in range(1, 10000):
+        collision = '' if copy == 1 else f' ({copy})'
+        prefix = readable_m4b_basename(title, max(1, 130 - len(tail) - len(collision)))
+        candidate = prefix + tail + collision
+        if candidate in reserved:
+            continue
+        if folder is not None and ((folder / (candidate + '.m4b')).exists()
+                                   or (folder / (candidate + '.partial.m4b')).exists()):
+            continue
+        return candidate
+    raise RuntimeError('Too many exports with the same title and part number')
+
+
+def job_category(status: str) -> str:
+    """A small stable set of queue filter groups."""
+    if status in {'queued', 'running', 'stopping'}:
+        return 'Pending / active'
+    if status == 'complete':
+        return 'Completed'
+    return 'Needs attention'
+
+
+def estimate_audio_duration(words: int, words_per_minute: int = 130) -> float:
+    """Audio estimate in seconds (not compute/processing time)."""
+    return max(0, words) * 60 / words_per_minute
+,
+    )
+    for expression in patterns:
+        match = re.search(expression, stem, re.I)
+        if match:
+            part, first, last = (int(match.group(1)), int(match.group(2)),
+                                 int(match.group(3) or match.group(2)))
+            if part > 0 and 1 <= first <= last and last - first <= 10000:
+                return part, list(range(first, last + 1))
+    return None
+
+
 def part_export_basename(title: str, part: int, indices, occupied=(), folder=None) -> str:
     """Create `Book Name - Part(n)` without replacing existing files or jobs.
 
