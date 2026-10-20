@@ -550,7 +550,7 @@ class MySQLMirror:
     """
 
     def __init__(self, cfg, password):
-        """Open SQLite, create missing tables and columns, and mark abandoned jobs interrupted."""
+        """Store MySQL mirror credentials and connection state; SQLite remains canonical."""
         self.cfg = dict(cfg)
         self.password = password
         self.connection = None

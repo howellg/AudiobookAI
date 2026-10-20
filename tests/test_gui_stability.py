@@ -9,6 +9,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -153,6 +154,50 @@ class GuiStabilityTests(unittest.TestCase):
         self.assertEqual(no_view, {})
         self.assertIsNone(no_eta)
 
+    def test_recent_chunk_eta_accounts_for_cached_audio(self):
+        plan = {1: {'chunks': 20, 'title': 'Test'}}
+        done = {1: 10}
+        # Fresh synthesis may be 8s/chunk; recent cache reads are much faster.
+        view, eta = progress_snapshot(plan, done, 1, False, [8.0],
+                                      recent_chunk_durations=[0.04] * 8 + [8.0, 8.0])
+        self.assertEqual(view['stat_chunks'], 'Chunks: 10 / 20')
+        self.assertAlmostEqual(eta, 16.32)
+        _, fully_cached = progress_snapshot(plan, done, 1, False, [],
+                                            recent_chunk_durations=[0.02] * 10)
+        self.assertAlmostEqual(fully_cached, 0.2)
+        _, completed = progress_snapshot(plan, {1: 20}, 1, False, [],
+                                         recent_chunk_durations=[0.02])
+        self.assertEqual(completed, 0)
+
+    def test_missing_epub_clears_stale_generate_selection_even_when_cached(self):
+        from audiobook_gui_v2 import Studio
+
+        class FakeTable:
+            def __init__(self):
+                self.rows = 2
+            def setRowCount(self, rows):
+                self.rows = rows
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lost_epub = Path(tmp) / 'disconnected.epub'
+            table = FakeTable()
+            fake = SimpleNamespace(
+                gen_book=SimpleNamespace(currentData=lambda: 42),
+                store=SimpleNamespace(book=lambda _book_id: {'path': str(lost_epub)}),
+                book_cache={42: ('Cached book', 'Author', ['stale chapter'])},
+                current_book_id=7, sections=['previous chapter'],
+                section_table=table, gen_details=FakeWidget(),
+                gen_selected=FakeWidget(), gen_saved_parts=FakeWidget(),
+                error=lambda *args: None)
+            fake.clear_generation_selection = lambda: Studio.clear_generation_selection(fake)
+            fake.refresh_saved_parts = lambda: Studio.refresh_saved_parts(fake)
+            Studio.book_combo_changed(fake)
+            self.assertIsNone(fake.current_book_id)
+            self.assertEqual(fake.sections, [])
+            self.assertEqual(table.rows, 0)
+            self.assertEqual(fake.gen_selected.text(), '0 selected')
+            self.assertIn('unavailable', fake.gen_details.text().lower())
+
     def test_export_does_not_override_encoding_ui(self):
         plan = {1: {"chunks": 10, "title": "Beginning"}}
         view, eta = progress_snapshot(plan, {1: 10}, 1, True, [2.])
@@ -170,6 +215,8 @@ class GuiStabilityTests(unittest.TestCase):
             plan={1: {"chunks": 100, "title": "Chapter"}},
             done_chunks={1: 15}, current_section=1, exporting=False,
             chunk_durations=deque([4.0], maxlen=40),
+            recent_chunk_durations=deque([0.03, 4.0], maxlen=120),
+            total_chunks=100,
             _progress_last_values={},
             **{name: FakeWidget() for name in names})
         Studio.paint_progress(fake)
@@ -206,7 +253,8 @@ class GuiStabilityTests(unittest.TestCase):
             plan={1: {"chunks": 10000, "title": "Long chapter"}},
             total_chunks=10000, done_chunks={1: 0}, current_section=1,
             current_chunk=0, current_total=10000, exporting=False,
-            chunk_durations=deque(maxlen=40), _last_paint=100.0,
+            chunk_durations=deque(maxlen=40),
+            recent_chunk_durations=deque(maxlen=120), _last_paint=100.0,
             paint_progress=lambda: calls.append("paint"),
             persist_progress=lambda force=False: None,
             write_log=lambda *args, **kwargs: None)

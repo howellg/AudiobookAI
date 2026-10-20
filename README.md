@@ -4,7 +4,7 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.6**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.8.7**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
@@ -16,6 +16,7 @@ AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated
 - **M4B export:** Assemble completed chapter WAVs into AAC-encoded M4B files with chapter markers. Long books can be exported as separate parts.
 - **V2.6 Archive Manager (preview):** Build a separate chaptered complete edition with editable metadata, optional embedded cover art, and your chosen destination (including external drives) without rerunning TTS.
 - **V2.7 Read Along:** Play completed chapter WAVs with highlighted saved narration chunks, click a chunk to seek, and open its chapter in the existing audio editor, automatically refresh repaired chapters, and resume where you left off. Chunk timing is estimated rather than sample-accurate.
+- **V2.8.7 review fixes:** Stop displaying stale Generate chapters when an EPUB has moved or vanished; calculate a recent-pace ETA using fast cached chunks as well as generated chunks; warn about specific internal chapter gaps before either complete-book export flow, while permitting intentional omitted front/back matter; retain completed parts in Archive after clearing finished queue rows. No narration/cache format changes.
 - **Persistent queue:** Keep books, selected sections, jobs, and progress in a local SQLite database.
 - **V2.8.6 half-second progress and detailed logs:** Refresh the Queue progress display and batch GUI log updates every 500 ms. Use **Detailed view** to show every chunk's text, cache use, generation timing and completion; return to **Compact view** for chapter milestones and warnings. Switching views keeps recent session history; all converter chunk text is retained in job diagnostics. The stable PySide6 6.11.2 pin is unchanged.
 - **V2.8.5 elapsed clock:** Update elapsed time once per second only during an active conversion, without restoring the previously disabled always-on Qt monitor.
@@ -86,6 +87,14 @@ The Queue page offers a **Detailed view** button above Recent generation message
 Both views buffer incoming messages and append a single batch to the GUI at most every 500 ms, rather than repainting for every chunk. The live log/history is bounded; persistent `output/diagnostics/` job logs retain chunk text and timing details. The **View job log** control opens those diagnostics. The separate SQLite checkpoint cadence remains unchanged. The elapsed clock is still shown in whole seconds but is checked twice a second without redundant label writes.
 
 After updating, finish the current conversion and restart Studio to load new Python code. Pulling a branch while Studio is already running does not reload the GUI.
+
+## Full-book coverage checks (V2.8.7)
+
+The regular **Review audio → Export complete audiobook** dialog and the **Archive → Export archival M4B** dialog now list skipped EPUB section ranges. Missing indices **between** the first and last selected sections receive a strong warning; omitted front/back matter is listed separately. The user must confirm the choice and may continue when those omissions are deliberate. The application still requires every *selected* section to be represented by a completed, verified chapter WAV. This coverage warning does not automatically mark an unqueued chapter complete or alter any files.
+
+If you move the source EPUB, **Generate** now clears its previous chapter selection instead of silently displaying stale rows for a different book. Restore the EPUB to its stored path (or re-import it) before queueing from that book.
+
+**Queue ETA** now estimates from the last 120 observed chunk times, including fast cache hits and edited takes. It is explicitly marked **recent pace**; if the next sections require fresh TTS, the estimate may rise as the workload changes. Export time is not included. SQLite writes remain rate-limited and PySide6 stays pinned to 6.11.2.
 
 ## Typical workflow
 

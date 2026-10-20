@@ -41,7 +41,9 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
                                 import_voice, freeze_voice, voice_name)
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
-from audiobookai_fullbook import collect_export_groups, verify_export_group
+from audiobookai_fullbook import (collect_export_groups, verify_export_group,
+                                  export_coverage, export_coverage_message,
+                                  compact_section_ranges)
 from audiobookai_archive import edition_info, save_edition, audio_duration
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
@@ -139,7 +141,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.8.6')
+        self.setWindowTitle('AudiobookAI Studio — V2.8.7')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -167,6 +169,8 @@ class Studio(QMainWindow):
         self.done_chunks = {}
         self.total_chunks = 0
         self.chunk_durations = deque(maxlen=40)
+        # Includes fast cache hits, unlike the legacy generated-only ETA sample.
+        self.recent_chunk_durations = deque(maxlen=120)
         self.current_section = None
         self.current_chunk = 0
         self.current_total = 0
@@ -200,7 +204,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.8.6 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.8.7 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -1226,7 +1230,11 @@ class Studio(QMainWindow):
             try:
                 conv = self.converter or load_converter()
                 self.converter = conv
-                self.archive_groups = collect_export_groups(self.store.jobs(), book_id, conv.book_folder)
+                # Preserve cleared finished jobs via verified permanent receipts,
+                # matching the regular complete-book export's selection.
+                history = [dict(row) for row in self.store.jobs()]
+                history.extend(self.store.recorded_jobs_for_export(book_id))
+                self.archive_groups = collect_export_groups(history, book_id, conv.book_folder)
                 for group in self.archive_groups:
                     self.archive_narrator.addItem(
                         f"{voice_name(group['voice_path'])} — {len(group['parts'])} parts, "
@@ -1261,13 +1269,19 @@ class Studio(QMainWindow):
             self.archive_cover.setText(metadata.get('cover', ''))
             ready = not group['unfinished']
             length = '—'
+            coverage_note = ''
             if ready:
                 indices = verify_export_group(group, int(book['sections']))
                 length = fmt_seconds(audio_duration(group['folder'], indices))
+                coverage = export_coverage(indices, int(book['sections']))
+                if coverage['interior']:
+                    coverage_note = (f" · WARNING: {len(coverage['interior'])} interior "
+                                     f"EPUB section(s) missing: "
+                                     f"{compact_section_ranges(coverage['interior'])}")
             self.archive_summary.setText(
                 f"{'Ready for archive' if ready else 'Still generating'} · "
                 f"{len(group['parts'])-len(group['unfinished'])}/{len(group['parts'])} finished parts · "
-                f"{len(group['indices'])} selected sections · {length} audio")
+                f"{len(group['indices'])} selected sections · {length} audio{coverage_note}")
             exported = Path(metadata.get('last_export', '')) if metadata.get('last_export') else None
             self.archive_result.setText(f'Last archive: {exported}' if exported and exported.is_file()
                                         else 'No archived M4B currently found.')
@@ -1324,6 +1338,7 @@ class Studio(QMainWindow):
                 raise ValueError('Title and author are required for archival export.')
             if details['cover'] and not Path(details['cover']).is_file():
                 raise ValueError('The selected cover image no longer exists.')
+            coverage_note = export_coverage_message(indices, int(book['sections']))
             filename = re.sub(r'[^\w .-]', '_', details['title']).strip()[:100] or 'audiobook'
             destination, _ = QFileDialog.getSaveFileName(
                 self, 'Save complete archival audiobook', str(Path.home() / f'{filename}.m4b'),
@@ -1333,6 +1348,13 @@ class Studio(QMainWindow):
             target = Path(destination)
             if target.suffix.lower() != '.m4b':
                 target = target.with_suffix('.m4b')
+            if QMessageBox.question(
+                    self, 'Confirm complete archival coverage',
+                    f'Export {len(indices)} EPUB section(s) to:\n{target}\n\n'
+                    f'{coverage_note}\n\n'
+                    'Continue only if any skipped sections are intentional.',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
             if target.exists() and QMessageBox.question(
                     self, 'Overwrite existing archive', f'Replace the existing file?\n{target}',
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
@@ -2231,19 +2253,34 @@ class Studio(QMainWindow):
             self.gen_book.setCurrentIndex(idx)
         self.book_combo_changed()
 
+    def clear_generation_selection(self):
+        """Prevent stale EPUB chapters from being queued after a load failure."""
+        self.current_book_id = None
+        self.sections = []
+        self.section_table.setRowCount(0)
+        self.gen_details.setText('Source EPUB unavailable — choose another book or restore the file.')
+        self.gen_selected.setText('0 selected')
+        self.refresh_saved_parts()
+
     def book_combo_changed(self, *_):
         """React to selecting a different book in the Generate dropdown."""
         book_id = self.gen_book.currentData()
         if book_id is None:
             return
+        book = self.store.book(book_id)
+        # Recheck the source even if its sections were cached earlier this session.
+        # Never show/queue the previous book's chapters under a missing EPUB.
+        if book is None or not Path(book['path']).is_file():
+            missing = book['path'] if book is not None else f'book #{book_id}'
+            self.clear_generation_selection()
+            self.error('Unable to open book', f'EPUB moved or missing: {missing}')
+            return
         if book_id not in self.book_cache:
-            book = self.store.book(book_id)
             try:
-                if not Path(book['path']).is_file():
-                    raise FileNotFoundError(f"EPUB moved or missing: {book['path']}")
                 self.converter = self.converter or load_converter()
                 self.book_cache[book_id] = self.converter.load_epub(Path(book['path']))
             except Exception as exc:
+                self.clear_generation_selection()
                 self.error('Unable to open book', exc)
                 return
         self.current_book_id = book_id
@@ -2654,6 +2691,7 @@ class Studio(QMainWindow):
         self.active_job_id = job_id
         self.started_at = time.monotonic()
         self.chunk_durations.clear()
+        self.recent_chunk_durations.clear()
         self.plan.clear()
         self.done_chunks.clear()
         self.total_chunks = 0
@@ -2687,7 +2725,8 @@ class Studio(QMainWindow):
         if self.proc is None:
             return
         incoming = bytes(self.proc.readAllStandardOutput()).decode('utf-8', errors='replace')
-        self.buffer += incoming.replace('\r', '\n')
+        # Normalize CRLF first; do not create a blank line per Windows newline.
+        self.buffer += incoming.replace('\r\n', '\n').replace('\r', '\n')
         *lines, self.buffer = self.buffer.split('\n')
         for raw in lines:
             line = raw.strip()
@@ -2727,8 +2766,12 @@ class Studio(QMainWindow):
             self.current_total = int(event['total'])
             # Monotonic accounting prevents duplicate/replayed cache events reversing progress.
             self.done_chunks[idx] = max(self.done_chunks.get(idx, 0), self.current_chunk)
-            if event.get('seconds') and float(event['seconds']) > 1.0:
-                self.chunk_durations.append(float(event['seconds']))
+            if event.get('seconds') is not None:
+                sample = max(0.001, float(event['seconds']))
+                self.recent_chunk_durations.append(sample)
+                # Retain the previous generated-only history for compatibility.
+                if sample > 1.0:
+                    self.chunk_durations.append(sample)
             duration = float(event.get('seconds') or 0)
             source = 'edited take' if event.get('edited') else 'generated/cache'
             self.write_log(f'Section {idx}: chunk {self.current_chunk}/{self.current_total} '
@@ -2778,9 +2821,12 @@ class Studio(QMainWindow):
             return
         view, eta = progress_snapshot(
             self.plan, self.done_chunks, self.current_section, self.exporting,
-            self.chunk_durations)
+            self.chunk_durations,
+            recent_chunk_durations=self.recent_chunk_durations)
         if eta is not None:
-            view['stat_eta'] = f'ETA: ~{fmt_seconds(eta)} + export'
+            view['stat_eta'] = f'ETA: ~{fmt_seconds(eta)} (recent pace) + export'
+        elif not self.exporting and sum(self.done_chunks.values()) >= self.total_chunks > 0:
+            view['stat_eta'] = 'ETA: finishing chapters / export'
         # Avoid repeatedly entering PySide6 native setters during 90-hour jobs.
         for name, value in view.items():
             if self._progress_last_values.get(name) == value:
@@ -3131,13 +3177,13 @@ class Studio(QMainWindow):
             # alongside its existing parts in the narrator-specific folder.
             output_name = conv.safe_name(book['title'], 100) + '_COMPLETE'
             output = group['folder'] / (output_name + '.m4b')
-            excluded = int(book['sections']) - len(indices)
+            coverage_note = export_coverage_message(indices, int(book['sections']))
             overwrite = '\nAn existing complete M4B will be replaced after verification.' if output.exists() else ''
             quality_note = quality_preflight(group['folder'], indices)
             prompt = (f"Combine {len(group['parts'])} finished part(s) into one M4B?\n\n"
                       f"Narrator: {voice_name(group['voice_path'])}\n"
                       f"Chapters: {len(indices)} (EPUB sections {indices[0]}–{indices[-1]})\n"
-                      f"Unselected EPUB sections: {excluded}\n"
+                      f"{coverage_note}\n"
                       f"Encoding: AAC 64 kbps mono, with chapter markers\n\n"
                       f"Output: {output}\n\n"
                       f"Quality check: {quality_note}\n\n"
