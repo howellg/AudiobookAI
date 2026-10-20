@@ -586,6 +586,20 @@ class MySQLMirror:
                     INDEX idx_jobs_status (status,id),
                     FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+                '''CREATE TABLE IF NOT EXISTS completed_parts (
+                    id BIGINT PRIMARY KEY,
+                    book_id BIGINT NOT NULL,
+                    source_job_id BIGINT NULL,
+                    part_number INT NOT NULL,
+                    indices_json JSON NOT NULL,
+                    output_name TEXT NOT NULL,
+                    output_path LONGTEXT NOT NULL,
+                    voice_path LONGTEXT NULL,
+                    finished DATETIME NOT NULL,
+                    size_bytes BIGINT NOT NULL,
+                    INDEX idx_completed_parts_book (book_id,part_number),
+                    FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
                 '''CREATE TABLE IF NOT EXISTS sync_state (
                     source_name VARCHAR(100) PRIMARY KEY,
                     synced_at DATETIME NOT NULL,
@@ -623,12 +637,14 @@ class MySQLMirror:
             # Replace all rows in one transaction: readers see either the old
             # complete snapshot or the new one. All tables belong only to this
             # local application's MySQL mirror.
+            cur.execute('DELETE FROM completed_parts')
             cur.execute('DELETE FROM jobs')
             cur.execute('DELETE FROM book_sections')
             cur.execute('DELETE FROM books')
             books = snapshot['books']
             sections = snapshot['book_sections']
             jobs = snapshot['jobs']
+            completed_parts = snapshot['completed_parts']
             if books:
                 cur.executemany('''INSERT INTO books
                     (id,path,path_sha256,title,author,sections,words,added)
@@ -650,6 +666,14 @@ class MySQLMirror:
                       j['added'],j['finished'],j['output_path'],j['error'],j['total_chunks'],
                       j['completed_chunks'],j['current_section'],j['current_chunk'],
                       j['current_total'],j['updated'],j.get('voice_path')) for j in jobs])
+            if completed_parts:
+                cur.executemany('''INSERT INTO completed_parts
+                    (id,book_id,source_job_id,part_number,indices_json,output_name,
+                     output_path,voice_path,finished,size_bytes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    [(p['id'],p['book_id'],p['source_job_id'],p['part_number'],
+                      p['indices'],p['output_name'],p['output_path'],p['voice_path'],
+                      p['finished'],p['size_bytes']) for p in completed_parts])
             cur.execute('''INSERT INTO sync_state(source_name,synced_at,book_count,job_count)
                            VALUES (%s, %s, %s, %s)
                            ON DUPLICATE KEY UPDATE synced_at=VALUES(synced_at),
