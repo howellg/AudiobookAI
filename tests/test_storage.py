@@ -202,6 +202,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(reopened.snapshot()['completed_parts']), 1)
         reopened.close()
 
+    def test_clear_finished_queue_only_when_archived(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        finished = store.add_job(book, 'Part 1', [1], 'Novel - Part(1)')
+        legacy_unverified = store.add_job(book, 'Legacy', [1], 'legacy_missing')
+        pending = store.add_job(book, 'Pending', [1], 'Novel - Part(2)')
+        output = self.path.parent / 'Novel - Part(1).m4b'
+        output.write_bytes(b'x' * 2048)
+        store.complete_job(finished, output)
+        store.update_job(legacy_unverified, 'complete', str(self.path.parent / 'missing.m4b'))
+        self.assertEqual(store.prune_recorded_jobs(), 1)
+        self.assertIsNone(store.job(finished))
+        self.assertIsNotNone(store.job(legacy_unverified))
+        self.assertIsNotNone(store.job(pending))
+        self.assertEqual(len(store.completed_parts(book)), 1)
+        self.assertTrue(output.is_file())
+        self.assertEqual(store.prune_recorded_jobs(), 0)
+        store.close()
+
     def test_failed_or_missing_m4b_is_never_recorded(self):
         store = Store(self.path)
         book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
