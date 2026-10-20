@@ -87,7 +87,7 @@ def save_password(cfg, password):
     keyring.set_password(KEYRING_SERVICE, credential_name(cfg), password)
 
 
-from audiobookai_convenience import part_number_from_name
+from audiobookai_convenience import part_number_from_name, legacy_part_selection
 
 
 class Store:
@@ -395,6 +395,60 @@ class Store:
                 if part:
                     maximum = max(maximum, part)
         return maximum + 1
+
+    def recover_legacy_exports(self, book_id, folder, voice_path=None):
+        """Import *verifiable* legacy completed files whose queue row was erased.
+
+        Older versions encoded contiguous section ranges in their filenames.
+        A valid duration/audio stream and one chapter marker per expected
+        section are required before recording a finished part. Do not import
+        ambiguous ranges, partial files or names reserved by current jobs.
+        """
+        import subprocess
+
+        root = Path(folder)
+        if not root.is_dir():
+            return 0
+        book = self.book(book_id)
+        if book is None:
+            return 0
+        reserved = {row['output_name'] for row in self.db.execute(
+            'SELECT output_name FROM jobs WHERE book_id=?', (book_id,))}
+        recorded = {row['output_path'] for row in self.db.execute(
+            'SELECT output_path FROM completed_parts WHERE book_id=?', (book_id,))}
+        recovered = 0
+        for output in sorted(root.glob('*.m4b')):
+            selection = legacy_part_selection(output.stem)
+            if not selection or output.stem in reserved or str(output) in recorded:
+                continue
+            number, indices = selection
+            if indices[-1] > int(book['sections']) or output.stat().st_size <= 1024:
+                continue
+            try:
+                probe = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                     '-show_entries', 'stream=codec_name:format=duration:chapter=start_time,end_time',
+                     '-of', 'json', str(output)],
+                    capture_output=True, text=True, check=True, timeout=30)
+                info = json.loads(probe.stdout)
+                valid = (bool(info.get('streams'))
+                         and float(info.get('format', {}).get('duration') or 0) > 0
+                         and len(info.get('chapters', [])) == len(indices))
+            except (OSError, ValueError, TypeError, subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired):
+                valid = False
+            if not valid:
+                continue
+            self._record_completed({
+                'id': None, 'book_id': book_id, 'name': output.stem,
+                'indices': json.dumps(indices), 'output_name': output.stem,
+                'voice_path': str(voice_path) if voice_path else None,
+            }, output)
+            recorded.add(str(output))
+            recovered += 1
+        if recovered:
+            self.changed()
+        return recovered
 
     def recorded_jobs_for_export(self, book_id):
         """Synthetic complete jobs for parts whose transient queue row was deleted."""
