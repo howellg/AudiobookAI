@@ -11,7 +11,7 @@ from collections import deque
 _CACHE_OUTPUT = re.compile(r"^Generated \d+(?:\.\d+)?s in \d+(?:\.\d+)?s$")
 
 
-_CHUNK_SOURCE = re.compile(r"^\\d+/\\d+:\\s")
+_CHUNK_SOURCE = re.compile(r"^\d+/\d+:\s")
 
 
 def chunk_source_log(line: str) -> bool:
@@ -45,12 +45,12 @@ class BufferedGenerationLog:
         lines = [line for line, extra in entries if detailed or not extra]
         if omitted:
             lines.insert(0, f"[{omitted:,} older log lines omitted from live view; see job log on disk]")
-        return "\\n".join(lines)
+        return "\n".join(lines)
 
     def replay(self, detailed=False):
         self.pending.clear()
         self.omitted = 0
-        return "\\n".join(line for line, extra in self.history
+        return "\n".join(line for line, extra in self.history
                          if detailed or not extra)
 
     def clear(self):
