@@ -115,8 +115,8 @@ class GuiStabilityTests(unittest.TestCase):
 
         class FakeProcess:
             def readAllStandardOutput(self):
-                return (b"173/200: The army advanced.\\nUsing cached audio.\\n"
-                        b"Generated 3.00s in 4.00s\\nCUDA out of memory\\n")
+                return (b"173/200: The army advanced.\nUsing cached audio.\n"
+                        b"Generated 3.00s in 4.00s\nCUDA out of memory\n")
 
         received = []
         fake = SimpleNamespace(
