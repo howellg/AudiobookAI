@@ -167,6 +167,85 @@ class StoreTests(unittest.TestCase):
         finally:
             reopened.close()
 
+    def test_completed_part_receipt_survives_queue_deletion_and_restart(self):
+        """Only a verified finished M4B is archived; the archive survives queue cleanup."""
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'I', 'Text'), Section(2, 'II', 'Text'),
+                                  Section(3, 'III', 'Text')])
+        job = store.add_job(book, 'Part 1', [1, 2], 'Novel - Part(1)')
+        exported = self.path.parent / 'Novel - Part(1).m4b'
+        exported.write_bytes(b'x' * 2048)
+        store.complete_job(job, exported)
+        self.assertEqual(store.job(job)['status'], 'complete')
+        self.assertEqual(len(store.completed_parts(book)), 1)
+        self.assertEqual(json.loads(store.completed_parts(book)[0]['indices']), [1, 2])
+        self.assertEqual(store.completed_parts(book)[0]['part_number'], 1)
+        store.remove_job(job)
+        self.assertIsNone(store.job(job))
+        self.assertEqual(store.claimed_sections(book), {1, 2})
+        self.assertEqual(store.next_part_number(book, folder=self.path.parent), 2)
+        self.assertEqual(len(store.recorded_jobs_for_export(book)), 1)
+        with self.assertRaisesRegex(ValueError, 'recorded completed parts'):
+            store.delete_book(book)
+        store.close()
+
+        reopened = Store(self.path)
+        self.assertEqual(reopened.claimed_sections(book), {1, 2})
+        self.assertEqual(reopened.completed_parts(book)[0]['output_path'], str(exported))
+        self.assertEqual(len(reopened.snapshot()['completed_parts']), 1)
+        reopened.close()
+
+    def test_failed_or_missing_m4b_is_never_recorded(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        job = store.add_job(book, 'Part 1', [1], 'Novel - Part(1)')
+        partial = self.path.parent / 'Novel - Part(1).partial.m4b'
+        partial.write_bytes(b'x' * 2048)
+        with self.assertRaises(ValueError):
+            store.complete_job(job, partial)
+        with self.assertRaises(ValueError):
+            store.complete_job(job, self.path.parent / 'Novel - Part(1).m4b')
+        self.assertEqual(store.job(job)['status'], 'queued')
+        self.assertEqual(store.completed_parts(book), [])
+        store.update_job(job, 'failed')
+        store.remove_job(job)
+        self.assertFalse(store.claimed_sections(book))
+        self.assertEqual(store.next_part_number(book), 1)
+        store.close()
+
+    def test_backfill_only_existing_finished_outputs_and_keep_legacy_names(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text'), Section(2, 'Chapter', 'Text')])
+        job1 = store.add_job(book, 'Part 1', [1],
+                             'Novel_part_01_sections_1_32d13cf858be')
+        job2 = store.add_job(book, 'Part 2', [2], 'Novel - Part 02 (Sections 2)')
+        output = self.path.parent / (store.job(job1)['output_name'] + '.m4b')
+        output.write_bytes(b'x' * 2048)
+        store.update_job(job1, 'complete', str(output))
+        store.update_job(job2, 'complete', str(self.path.parent / 'missing.m4b'))
+        self.assertEqual(store.completed_parts(book), [])
+        store.close()
+        reopened = Store(self.path)
+        self.assertEqual(len(reopened.completed_parts(book)), 1)
+        self.assertEqual(reopened.completed_parts(book)[0]['part_number'], 1)
+        self.assertEqual(reopened.claimed_sections(book), {1, 2})  # active completed job 2
+        reopened.remove_job(job2)
+        self.assertEqual(reopened.claimed_sections(book), {1})  # missing file not recorded
+        reopened.close()
+
+    def test_part_number_survives_deleted_legacy_jobs_via_disk(self):
+        store = Store(self.path)
+        book = store.import_book('/tmp/novel.epub', 'Novel', 'Writer',
+                                 [Section(1, 'Chapter', 'Text')])
+        old = self.path.parent / 'A_New_Player_in_the_Game_part_09_sections_123-137_32d13cf858be.m4b'
+        old.write_bytes(b'x' * 2048)
+        self.assertEqual(store.next_part_number(book, folder=self.path.parent), 10)
+        self.assertEqual(store.completed_parts(book), [])
+        store.close()
+
     def test_backfill_existing_sections(self):
         """Verify backfill existing sections behavior."""
         store = Store(self.path)
