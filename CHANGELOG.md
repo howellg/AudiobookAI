@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.7 — Third-party review fixes and export completeness warnings
+
+- Clear Generate's selected EPUB/chapter state on a missing or unloadable source file, even if the previous sections are cached in memory.
+- Calculate a labeled **recent-pace ETA** from all observed chunk durations, including very fast cache hits and edited takes, rather than only chunks taking more than a second.
+- Warn explicitly about skipped EPUB section ranges inside the selected story span and skipped front/back sections before the regular or metadata-rich archival M4B export.
+- Keep both export paths advisory about deliberate chapter omissions; retain strict checks for all selected finished chapters and preserve existing WAV/M4B files.
+- Improve CRLF normalization for converter logs and correct a copy-pasted MySQL mirror docstring.
+- Add offline tests for missing EPUB state, fully cached/mixed ETAs and full-book gap detection. No database schema, speech engine, cache paths, M4B naming or pinned dependency changes.
+
+
 ## 2.8.6 — Faster queue refresh and selectable log detail
 
 - Increase Queue progress repaint cadence from 2.0 to **0.5 seconds** for active jobs, while preserving native setter deduplication and throttled SQLite checkpoints.
