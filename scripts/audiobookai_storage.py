@@ -611,6 +611,7 @@ class MySQLMirror:
                     current_total INT NOT NULL DEFAULT 0,
                     updated DATETIME NULL,
                     voice_path LONGTEXT NULL,
+                    acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard',
                     INDEX idx_jobs_status (status,id),
                     FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
@@ -623,6 +624,7 @@ class MySQLMirror:
                     output_name TEXT NOT NULL,
                     output_path LONGTEXT NOT NULL,
                     voice_path LONGTEXT NULL,
+                    acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard',
                     finished DATETIME NOT NULL,
                     size_bytes BIGINT NOT NULL,
                     INDEX idx_completed_parts_book (book_id,part_number),
@@ -640,6 +642,10 @@ class MySQLMirror:
             cur.execute("SHOW COLUMNS FROM jobs LIKE 'voice_path'")
             if cur.fetchone() is None:
                 cur.execute('ALTER TABLE jobs ADD COLUMN voice_path LONGTEXT NULL')
+            for table in ('jobs', 'completed_parts'):
+                cur.execute(f"SHOW COLUMNS FROM {table} LIKE 'acting_mode'")
+                if cur.fetchone() is None:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard'")
             self.connection.commit()
             cur.close()
             self.last_error = None
@@ -688,20 +694,20 @@ class MySQLMirror:
                 cur.executemany('''INSERT INTO jobs
                     (id,book_id,name,indices_json,output_name,status,added,finished,
                      output_path,error,total_chunks,completed_chunks,current_section,
-                     current_chunk,current_total,updated,voice_path)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     current_chunk,current_total,updated,voice_path,acting_mode)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     [(j['id'],j['book_id'],j['name'],j['indices'],j['output_name'],j['status'],
                       j['added'],j['finished'],j['output_path'],j['error'],j['total_chunks'],
                       j['completed_chunks'],j['current_section'],j['current_chunk'],
-                      j['current_total'],j['updated'],j.get('voice_path')) for j in jobs])
+                      j['current_total'],j['updated'],j.get('voice_path'),j.get('acting_mode','standard')) for j in jobs])
             if completed_parts:
                 cur.executemany('''INSERT INTO completed_parts
                     (id,book_id,source_job_id,part_number,indices_json,output_name,
-                     output_path,voice_path,finished,size_bytes)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     output_path,voice_path,finished,size_bytes,acting_mode)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     [(p['id'],p['book_id'],p['source_job_id'],p['part_number'],
                       p['indices'],p['output_name'],p['output_path'],p['voice_path'],
-                      p['finished'],p['size_bytes']) for p in completed_parts])
+                      p['finished'],p['size_bytes'],p.get('acting_mode','standard')) for p in completed_parts])
             cur.execute('''INSERT INTO sync_state(source_name,synced_at,book_count,job_count)
                            VALUES (%s, %s, %s, %s)
                            ON DUPLICATE KEY UPDATE synced_at=VALUES(synced_at),
