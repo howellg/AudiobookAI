@@ -42,6 +42,7 @@ from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_ch
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import (collect_export_groups, verify_export_group,
+                                  recorded_export_indices,
                                   export_coverage, export_coverage_message,
                                   compact_section_ranges)
 from audiobookai_archive import edition_info, save_edition, audio_duration
@@ -141,7 +142,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.8.8')
+        self.setWindowTitle('AudiobookAI Studio — V2.8.9')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -3124,11 +3125,11 @@ class Studio(QMainWindow):
                 self.export_table.setItem(r, c, item(value, str(path) if c == 0 else None))
 
     def export_complete_book(self):
-        """Create a single archival M4B from finished queue parts, without TTS.
+        """Export saved parts or all verified chapter WAVs for one narrator.
 
-        All parts must be complete, and every section must have an assembled
-        chapter WAV. The narrator grouping uses the converter's actual output
-        path, so WAVs from different speakers cannot be mixed accidentally.
+        The chapter manifest can contain regenerated sections missing from
+        completed-job history. Require explicit selection of those extra WAVs
+        and retain the existing narrator isolation and preflight validation.
         The export runs in its own process to keep Qt responsive.
         """
         if self.proc is not None or self.run_queue or self.full_export_proc is not None:
@@ -3172,7 +3173,33 @@ class Studio(QMainWindow):
                 group = groups[choices.index(selected)]
             else:
                 group = groups[0]
-            indices = verify_export_group(group, int(book['sections']))
+            total_sections = int(book['sections'])
+            saved_indices = verify_export_group(group, total_sections)
+            manifest_indices = recorded_export_indices(group, total_sections)
+            extra_indices = sorted(set(manifest_indices) - set(saved_indices))
+            indices = saved_indices
+            using_manifest = False
+            if extra_indices:
+                choices = [
+                    (f"All recorded chapters — {len(manifest_indices)} sections "
+                     f"({manifest_indices[0]}–{manifest_indices[-1]}); "
+                     f"+{len(extra_indices)} beyond saved parts"),
+                    (f"Saved parts only — {len(saved_indices)} sections "
+                     f"({saved_indices[0]}–{saved_indices[-1]})"),
+                ]
+                selection, accepted = QInputDialog.getItem(
+                    self, 'Choose chapters for complete audiobook',
+                    (f"Found {len(extra_indices)} additional finished chapter WAV(s) "
+                     f"in {voice_name(group['voice_path'])}'s manifest: "
+                     f"{compact_section_ranges(extra_indices)}.\n"
+                     'These recordings are not included in saved part history. '
+                     'Which chapters should the full-book export include?'),
+                    choices, 0, False)
+                if not accepted:
+                    return
+                using_manifest = selection == choices[0]
+                if using_manifest:
+                    indices = manifest_indices
             # Reuse the converter's filename sanitization; put the final book
             # alongside its existing parts in the narrator-specific folder.
             output_name = conv.safe_name(book['title'], 100) + '_COMPLETE'
@@ -3180,7 +3207,10 @@ class Studio(QMainWindow):
             coverage_note = export_coverage_message(indices, int(book['sections']))
             overwrite = '\nAn existing complete M4B will be replaced after verification.' if output.exists() else ''
             quality_note = quality_preflight(group['folder'], indices)
-            prompt = (f"Combine {len(group['parts'])} finished part(s) into one M4B?\n\n"
+            source_note = (f"{len(group['parts'])} saved part(s) plus "
+                           f"{len(extra_indices)} independently recorded chapter WAV(s)"
+                           if using_manifest else f"{len(group['parts'])} saved part(s)")
+            prompt = (f"Combine {source_note} into one M4B?\n\n"
                       f"Narrator: {voice_name(group['voice_path'])}\n"
                       f"Chapters: {len(indices)} (EPUB sections {indices[0]}–{indices[-1]})\n"
                       f"{coverage_note}\n"
