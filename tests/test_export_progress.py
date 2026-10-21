@@ -79,6 +79,33 @@ class ProgressParserTests(unittest.TestCase):
             finally:
                 converter.STUDIO_EVENTS = previous
             self.assertTrue(result.is_file())
+            # Regression: an .m4b extension alone is not enough. Without
+            # explicit -brand ffmpeg writes M4A as the file's major brand.
+            import subprocess
+            details = subprocess.run([
+                'ffprobe', '-v', 'error', '-show_entries',
+                'format_tags=major_brand,media_type', '-of', 'json',
+                str(result)], capture_output=True, text=True, check=True)
+            tags = json.loads(details.stdout)['format']['tags']
+            self.assertEqual(tags.get('major_brand'), 'M4B ')
+            self.assertEqual(tags.get('media_type'), '2')
+            # The moov index must precede the audio payload for fast start.
+            atoms = []
+            with result.open('rb') as audiobook:
+                offset = 0
+                for _ in range(8):
+                    audiobook.seek(offset)
+                    head = audiobook.read(8)
+                    if len(head) != 8:
+                        break
+                    size = int.from_bytes(head[:4], 'big')
+                    kind = head[4:]
+                    atoms.append(kind)
+                    if kind == b'mdat' or size < 8:
+                        break
+                    offset += size
+            self.assertIn(b'moov', atoms)
+            self.assertLess(atoms.index(b'moov'), atoms.index(b'mdat'))
             events = [json.loads(line.split('AUDIOBOOKAI_EVENT ', 1)[1])
                       for line in output.getvalue().splitlines()
                       if line.startswith('AUDIOBOOKAI_EVENT ')]

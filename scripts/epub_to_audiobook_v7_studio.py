@@ -555,7 +555,13 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
            "-i", str(concat), "-f", "ffmetadata", "-i", str(metadata),
            "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "1",
-           "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-ar", str(sr), str(partial)]
+           # Mark these files as audiobooks, not generic M4A music. Some
+           # Android players choose chapter handling from the container brand.
+           # Put the chapter/index metadata at the beginning for readers that
+           # cannot seek efficiently through very large (multi-GB) books.
+           "-metadata", "media_type=2", "-brand", "M4B ",
+           "-movflags", "+faststart", "-c:a", "aac", "-b:a", "64k",
+           "-ac", "1", "-ar", str(sr), str(partial)]
     check_stop()
     print(f"\nEncoding {len(chosen)} section(s) into M4B ...", flush=True)
     duration_seconds = elapsed_samples / sr
