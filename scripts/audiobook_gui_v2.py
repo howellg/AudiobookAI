@@ -792,9 +792,10 @@ class Studio(QMainWindow):
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
                         voice = manifest.get('voice_path')
-                    except (OSError, ValueError, TypeError):
+                        mode = manifest.get('acting_mode', 'standard')
+                    except (OSError, ValueError, TypeError, AttributeError):
                         voice = None
-                    mode = manifest.get('acting_mode', 'standard') if isinstance(manifest, dict) else 'standard'
+                        mode = 'expressive' if folder.name == 'expressive' else 'standard'
                     self.integrity_groups.append({'folder': folder, 'voice_path': voice, 'acting_mode': mode})
                     self.integrity_voice.addItem(voice_name(voice) + delivery_label(mode),
                                                  len(self.integrity_groups) - 1)
@@ -1059,11 +1060,12 @@ class Studio(QMainWindow):
                     try:
                         details = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
                         voice = details.get('voice_path')
-                    except (ValueError, OSError, TypeError):
+                        mode = details.get('acting_mode', 'standard')
+                    except (ValueError, OSError, TypeError, AttributeError):
                         voice = None
+                        mode = 'expressive' if folder.name == 'expressive' else 'standard'
                     self.quality_groups.append({
-                        'folder': folder, 'voice_path': voice,
-                        'acting_mode': details.get('acting_mode', 'standard') if isinstance(details, dict) else 'standard',
+                        'folder': folder, 'voice_path': voice, 'acting_mode': mode,
                         'parts': [], 'unfinished': [], 'indices': []})
                 for n, group in enumerate(self.quality_groups):
                     self.quality_narrator.addItem(
