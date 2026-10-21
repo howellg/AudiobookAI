@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from audiobookai_fullbook import (collect_export_groups, verify_export_group,
-                                   export_coverage, export_coverage_message,
-                                   compact_section_ranges)
+                                   recorded_export_indices, export_coverage,
+                                   export_coverage_message, compact_section_ranges)
 import epub_to_audiobook_v7_studio as converter
 
 
@@ -56,6 +56,67 @@ class CompleteExportTests(unittest.TestCase):
             group = {'folder': folder, 'voice_path': None, 'indices': [2, 3], 'unfinished': []}
             with self.assertRaisesRegex(ValueError, 'rendered chapter WAV'):
                 verify_export_group(group, 5)
+
+    def test_manifest_recovery_includes_regenerated_chapters_not_in_saved_parts(self):
+        """Re-recorded early sections share a narrator manifest, not part receipts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'chapters').mkdir()
+            recorded = {}
+            for index in range(3, 205):
+                (folder / 'chapters' / f'{index:04d}.wav').write_bytes(b'RIFF')
+                recorded[str(index)] = {'sample_rate': 24000, 'samples': 24000}
+            (folder / 'manifest.json').write_text(json.dumps({'chapters': recorded}))
+            group = {'folder': folder, 'voice_path': None,
+                     'indices': list(range(123, 205)), 'unfinished': []}
+            self.assertEqual(len(verify_export_group(group, 205)), 82)
+            recovered = recorded_export_indices(group, 205)
+            self.assertEqual(recovered, list(range(3, 205)))
+            self.assertEqual(len(set(recovered) - set(group['indices'])), 120)
+            self.assertEqual(export_coverage(recovered, 205)['before'], [1, 2])
+            self.assertEqual(export_coverage(recovered, 205)['after'], [205])
+            self.assertEqual(group['indices'], list(range(123, 205)))
+
+    def test_manifest_recovery_fails_closed_when_a_recorded_wav_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'chapters').mkdir()
+            (folder / 'chapters' / '0003.wav').write_bytes(b'RIFF')
+            (folder / 'manifest.json').write_text(json.dumps({'chapters': {
+                '3': {'sample_rate': 24000, 'samples': 24000},
+                '4': {'sample_rate': 24000, 'samples': 24000},
+            }}))
+            group = {'folder': folder, 'voice_path': None,
+                     'indices': [3], 'unfinished': []}
+            self.assertEqual(verify_export_group(group, 5), [3])
+            with self.assertRaisesRegex(ValueError, 'rendered chapter WAV'):
+                recorded_export_indices(group, 5)
+
+    def test_manifest_recovery_rejects_invalid_or_out_of_range_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            group = {'folder': folder, 'voice_path': None,
+                     'indices': [3], 'unfinished': []}
+            for chapters, error in [
+                ({'not-a-number': {}}, 'Invalid chapter number'),
+                ({'6': {}}, 'outside this EPUB'),
+                ({'0': {}}, 'outside this EPUB'),
+                ({'3': {'sample_rate': 24000, 'samples': 0}}, 'rendered chapter WAV'),
+            ]:
+                (folder / 'manifest.json').write_text(json.dumps({'chapters': chapters}))
+                with self.assertRaisesRegex(ValueError, error):
+                    recorded_export_indices(group, 5)
+
+    def test_manifest_recovery_never_bypasses_unfinished_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / 'manifest.json').write_text(json.dumps({'chapters': {
+                '3': {'sample_rate': 24000, 'samples': 24000}
+            }}))
+            group = {'folder': folder, 'voice_path': None,
+                     'indices': [3], 'unfinished': [{'id': 4, 'status': 'running'}]}
+            with self.assertRaisesRegex(ValueError, 'not complete'):
+                recorded_export_indices(group, 5)
 
     def test_export_audit_flags_internal_gaps_without_rejecting_front_matter(self):
         report = export_coverage([3, 4, 6, 7], 9)
