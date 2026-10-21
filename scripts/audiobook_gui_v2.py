@@ -46,6 +46,7 @@ from audiobookai_fullbook import (collect_export_groups, verify_export_group,
                                   export_coverage, export_coverage_message,
                                   compact_section_ranges)
 from audiobookai_archive import edition_info, save_edition, audio_duration
+from audiobookai_integrity import inspect_book
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
                                       chunk_source_log, BufferedGenerationLog)
@@ -142,7 +143,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.8.9')
+        self.setWindowTitle('AudiobookAI Studio — V2.9.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -205,12 +206,12 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.8.8 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.9.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive', 'Read Along']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive', 'Read Along', 'Book Integrity']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -239,6 +240,7 @@ class Studio(QMainWindow):
         self.make_pronunciation_page()
         self.make_archive_page()
         self.make_readalong_page()
+        self.make_integrity_page()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -317,6 +319,8 @@ class Studio(QMainWindow):
             self.pronunciation_refresh_books()
         if index == 7 and self.archive_proc is None:
             self.archive_refresh_books()
+        if index == 9:
+            self.integrity_refresh_books()
         if index == 8:
             self.reader_initialize_audio()
             self.reader_refresh_books()
@@ -662,6 +666,223 @@ class Studio(QMainWindow):
         note.setWordWrap(True)
         note.setObjectName('muted')
         l.addWidget(note)
+
+    def make_integrity_page(self):
+        """Create the read-only per-book, per-narrator production audit."""
+        l = self.page_base('Book Completion & Integrity',
+            'Audit recorded chapters, queue history, missing files, quality control and complete-book exports. '
+            'The expected story range is inferred from existing work; excluded EPUB sections are always shown.')
+        selectors = QHBoxLayout()
+        selectors.addWidget(QLabel('Book:'))
+        self.integrity_book = QComboBox()
+        self.integrity_book.currentIndexChanged.connect(self.integrity_book_changed)
+        selectors.addWidget(self.integrity_book, 2)
+        selectors.addWidget(QLabel('Narrator:'))
+        self.integrity_voice = QComboBox()
+        self.integrity_voice.currentIndexChanged.connect(self.integrity_refresh)
+        selectors.addWidget(self.integrity_voice, 2)
+        l.addLayout(selectors)
+        self.integrity_groups = []
+        self.integrity_summary = QLabel('Select a book to inspect its narration.')
+        self.integrity_summary.setWordWrap(True)
+        l.addWidget(self.integrity_summary)
+        self.integrity_progress = QProgressBar()
+        self.integrity_progress.setRange(0, 100)
+        l.addWidget(self.integrity_progress)
+        self.integrity_counts = QLabel('')
+        self.integrity_counts.setWordWrap(True)
+        l.addWidget(self.integrity_counts)
+        l.addWidget(title_label('Production checklist', 14))
+        self.integrity_checklist = QLabel('')
+        self.integrity_checklist.setWordWrap(True)
+        self.integrity_checklist.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(self.integrity_checklist)
+        actions = QHBoxLayout()
+        actions.addWidget(mk_button('Refresh integrity', self.integrity_refresh))
+        actions.addWidget(mk_button('Review chapters →', self.integrity_open_review))
+        actions.addWidget(mk_button('Quality Control →', self.integrity_open_quality))
+        actions.addWidget(mk_button('Export complete M4B →', self.integrity_open_export))
+        actions.addStretch()
+        l.addLayout(actions)
+        self.integrity_table = QTableWidget(0, 3)
+        self.integrity_table.setHorizontalHeaderLabels(['EPUB #', 'Chapter title', 'Status'])
+        self.setup_table(self.integrity_table)
+        self.integrity_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        l.addWidget(self.integrity_table, 1)
+        self.integrity_foot = QLabel('Audio integrity here checks file presence and manifest metadata. '
+                                     'Use Quality Control for decoded-audio tests.')
+        self.integrity_foot.setObjectName('muted')
+        self.integrity_foot.setWordWrap(True)
+        l.addWidget(self.integrity_foot)
+
+    def integrity_refresh_books(self):
+        """Keep dashboard book selection stable across Library refreshes."""
+        if not hasattr(self, 'integrity_book'):
+            return
+        selected = self.integrity_book.currentData()
+        self.integrity_book.blockSignals(True)
+        self.integrity_book.clear()
+        for book in self.store.books():
+            self.integrity_book.addItem(book['title'], book['id'])
+        desired = selected if selected is not None else self.current_book_id
+        if desired is not None:
+            index = self.integrity_book.findData(desired)
+            if index >= 0:
+                self.integrity_book.setCurrentIndex(index)
+        self.integrity_book.blockSignals(False)
+        self.integrity_book_changed()
+
+    def integrity_book_changed(self, *_):
+        """Discover each narrator folder, including orphaned manifest recordings."""
+        self.integrity_groups = []
+        self.integrity_voice.blockSignals(True)
+        self.integrity_voice.clear()
+        book_id = self.integrity_book.currentData()
+        book = self.store.book(book_id) if book_id is not None else None
+        if book:
+            try:
+                conv = self.converter or load_converter()
+                self.converter = conv
+                base = conv.book_folder(Path(book['path']))
+                paths = [base]
+                paths.extend(sorted((base / 'voices').glob('voice_*')))
+                for folder in paths:
+                    manifest_path = folder / 'manifest.json'
+                    if not manifest_path.is_file():
+                        continue
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                        voice = manifest.get('voice_path')
+                    except (OSError, ValueError, TypeError):
+                        voice = None
+                    self.integrity_groups.append({'folder': folder, 'voice_path': voice})
+                    self.integrity_voice.addItem(voice_name(voice), len(self.integrity_groups) - 1)
+                if not self.integrity_groups:
+                    self.integrity_groups.append({'folder': base, 'voice_path': None})
+                    self.integrity_voice.addItem('British narrator (default)', 0)
+            except Exception as exc:
+                self.integrity_summary.setText(f'Unable to discover narrator folders: {exc}')
+        self.integrity_voice.blockSignals(False)
+        self.integrity_refresh()
+
+    def integrity_current(self):
+        book_id = self.integrity_book.currentData()
+        selected = self.integrity_voice.currentData()
+        if book_id is None or selected is None or selected >= len(self.integrity_groups):
+            return None, None
+        return self.store.book(book_id), self.integrity_groups[selected]
+
+    def integrity_refresh(self, *_):
+        """Show section coverage without reading/decoding large WAV payloads."""
+        book, narrator = self.integrity_current()
+        if not book or not narrator:
+            self.integrity_progress.setValue(0)
+            self.integrity_table.setRowCount(0)
+            self.integrity_counts.setText('')
+            self.integrity_checklist.setText('')
+            return
+        try:
+            conv = self.converter or load_converter()
+            self.converter = conv
+            folder = narrator['folder']
+            active_jobs = []
+            for row in self.store.jobs():
+                if row['book_id'] != book['id']:
+                    continue
+                try:
+                    actual = conv.book_folder(Path(row['book_path']),
+                        Path(row['voice_path']) if row['voice_path'] else None)
+                    if Path(actual).resolve() == folder.resolve():
+                        active_jobs.append(dict(row))
+                except (OSError, ValueError):
+                    continue
+            receipts = []
+            for row in self.store.completed_parts(book['id']):
+                try:
+                    actual = conv.book_folder(Path(row['book_path']),
+                        Path(row['voice_path']) if row['voice_path'] else None)
+                    if Path(actual).resolve() == folder.resolve():
+                        receipts.append(dict(row))
+                except (OSError, ValueError):
+                    continue
+            audit = inspect_book(folder, book['sections'], active_jobs, receipts)
+            expected = audit['expected']
+            if not expected:
+                self.integrity_summary.setText('No chapter recordings or planned sections for this narrator yet.')
+                self.integrity_counts.setText('')
+                self.integrity_checklist.setText('')
+                self.integrity_table.setRowCount(0)
+                self.integrity_progress.setValue(0)
+                return
+            titles = {row['section_index']: row['title'] for row in self.store.db.execute(
+                'SELECT section_index,title FROM book_sections WHERE book_id=?', (book['id'],))}
+            self.integrity_table.setRowCount(len(audit['rows']))
+            for r, entry in enumerate(audit['rows']):
+                index = entry['section']
+                for c, value in enumerate((index, titles.get(index, f'Section {index}'), entry['state'])):
+                    self.integrity_table.setItem(r, c, item(value))
+            completed = len(audit['recorded'])
+            count = len(expected)
+            self.integrity_progress.setValue(round(completed * 100 / count))
+            self.integrity_summary.setText(
+                f"{book['title']} — {voice_name(narrator['voice_path'])} | "
+                f"Story range: sections {expected[0]}–{expected[-1]} ({count} selected of "
+                f"{audit['total']} EPUB sections).")
+            self.integrity_counts.setText(
+                f"Recorded {completed}/{count} ({completed * 100 / count:.1f}%)  ·  "
+                f"Queued/unfinished {len(audit['queued'])}  ·  Missing/damaged {len(audit['missing'])}  ·  "
+                f"Not started {len(audit['not_started'])}  ·  "
+                f"Completed parts on disk {audit['verified_receipt_parts']}/{audit['receipt_parts']}")
+            outside = compact_section_ranges(audit['outside']) if audit['outside'] else 'none'
+            missing = compact_section_ranges(audit['missing']) if audit['missing'] else 'none'
+            source_ready = Path(book['path']).is_file()
+            exports = len(audit['full_exports'])
+            checklist = [
+                f"{'✓' if source_ready else '✗'} EPUB imported and source available",
+                f"{'✓' if audit['receipt_parts'] else '—'} Completed part receipts: "
+                f"{audit['verified_receipt_parts']}/{audit['receipt_parts']} outputs available "
+                '(receipts are not required for re-recorded chapter WAVs)',
+                f"{'✓' if audit['wav_ready'] else '✗'} All selected chapters recorded and "
+                'compatible for complete export',
+                f"{'✓' if audit['qc'] == 'Passed' else '—'} Audio quality: {audit['qc']}",
+                f"{'✓' if exports else '—'} Complete M4B on disk: {exports} "
+                '(chapter-count integrity not yet verified)',
+                f"Excluded EPUB sections (review intentionally omitted front/back matter): {outside}",
+                f"Missing/damaged within story range: {missing}",
+            ]
+            if audit['manifest_error']:
+                checklist.append('Manifest error: ' + audit['manifest_error'])
+            self.integrity_checklist.setText('\n'.join(checklist))
+        except Exception as exc:
+            self.integrity_summary.setText(f'Integrity inspection failed: {exc}')
+            self.integrity_progress.setValue(0)
+
+    def integrity_open_review(self):
+        book, _ = self.integrity_current()
+        if book is None:
+            return
+        index = self.review_book.findData(book['id'])
+        if index >= 0:
+            self.review_book.setCurrentIndex(index)
+        self.change_page(3)
+
+    def integrity_open_quality(self):
+        book, narrator = self.integrity_current()
+        if book is None:
+            return
+        index = self.quality_book.findData(book['id'])
+        if index >= 0:
+            self.quality_book.setCurrentIndex(index)
+        self.change_page(5)
+        if narrator:
+            for i, group in enumerate(self.quality_groups):
+                if Path(group['folder']).resolve() == narrator['folder'].resolve():
+                    self.quality_narrator.setCurrentIndex(i)
+                    break
+
+    def integrity_open_export(self):
+        self.integrity_open_review()
+        self.export_complete_book()
 
     def make_quality_page(self):
         """Create the read-only QC dashboard for existing chapter and chunk WAVs.
@@ -2213,6 +2434,7 @@ class Studio(QMainWindow):
         self.gen_book.blockSignals(False)
         self.review_book.blockSignals(False)
         self.quality_refresh_books()
+        self.integrity_refresh_books()
         if books:
             self.book_combo_changed()
         else:
