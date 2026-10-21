@@ -31,6 +31,7 @@ from pathlib import Path
 import audiobookai_production as production
 from audiobookai_convenience import readable_m4b_basename
 from audiobookai_pronunciation import load_snapshot, apply_rules, rules_digest
+from audiobookai_acting import ACTING_MODES, validate_acting_mode
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOKS = ROOT / "books"
@@ -39,6 +40,7 @@ ENGINE_FILE = Path(__file__).with_name("test_five_minutes_v7_smooth.py")
 STUDIO_EVENTS = False
 STOP_REQUESTED = False
 ACTIVE_VOICE = None  # CLI --voice; None leaves original V7 paths unchanged.
+ACTIVE_ACTING_MODE = 'standard'  # Immutable CLI --acting-mode; opt-in only.
 ACTIVE_PRONUNCIATIONS = []  # Only set from an immutable per-job snapshot.
 PRONUNCIATION_SNAPSHOT = None
 
@@ -209,27 +211,30 @@ def load_engine():
     # Override only this converter process; the default file remains unchanged.
     if ACTIVE_VOICE is not None:
         module.VOICE_FILE = ACTIVE_VOICE
+    module.ACTING_MODE = validate_acting_mode(ACTIVE_ACTING_MODE)
     if not module.VOICE_FILE.is_file():
         raise SystemExit(f"Missing narrator sample: {module.VOICE_FILE}")
     module.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return module
 
 
-def book_folder(path: Path, voice_path: Path | None = None):
-    # Preserve the existing default-narrator folder for backwards compatibility.
-    """Separate completed chapters by narrator identity while keeping legacy default paths."""
+def book_folder(path: Path, voice_path: Path | None = None, acting_mode: str | None = None):
+    """Separate chapters by narrator AND opted-in delivery without changing legacy paths."""
     # Include the source location so same-titled books do not share chapter folders.
     fingerprint = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
     original = OUT_ROOT / f"{safe_name(path.stem, 60)}_{fingerprint}_smooth_v7"
     voice = voice_path if voice_path is not None else ACTIVE_VOICE
     # Legacy British-narrator output must remain discoverable after upgrades.
     if voice is None or Path(voice).resolve() == (ROOT / 'voices' / 'british_narrator.wav').resolve():
-        return original
-    # Isolate assembled chapter WAVs by actual voice content. Do not reuse a
-    # different narrator's completed chapter, or overwrite its existing WAVs.
-    from audiobookai_voices import sha256_file
-    digest = sha256_file(Path(voice))[:16]
-    return original / 'voices' / f'voice_{digest}'
+        folder = original
+    else:
+        # Isolate assembled chapter WAVs by actual voice content.
+        from audiobookai_voices import sha256_file
+        digest = sha256_file(Path(voice))[:16]
+        folder = original / 'voices' / f'voice_{digest}'
+    mode = validate_acting_mode(acting_mode if acting_mode is not None else ACTIVE_ACTING_MODE)
+    # Explicitly separate a performance's WAVs/manifest from normal narration.
+    return folder if mode == 'standard' else folder / 'performances' / mode
 
 
 def chapter_signature(engine, section):
@@ -246,6 +251,8 @@ def chapter_signature(engine, section):
                  "assembly": [engine.FINAL_CONTINUATION_PAUSE, engine.EDGE_KEEP_SECONDS, engine.MAX_EDGE_TRIM_SECONDS, engine.FINAL_COMMA_PAUSE, engine.FINAL_SENTENCE_PAUSE,
                               engine.FINAL_DIALOGUE_PAUSE, engine.FINAL_PARAGRAPH_PAUSE,
                               engine.FINAL_SCENE_PAUSE, engine.LEADING_PAD_FINAL, engine.MAX_PEAK]}
+    if engine.ACTING_MODE != 'standard':
+        signature["acting_mode"] = engine.ACTING_MODE
     digest = hashlib.sha256(json.dumps(signature, ensure_ascii=False).encode()).hexdigest()
     return chunks, digest
 
@@ -303,7 +310,8 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
     manifest_path = out / "manifest.json"
     manifest = read_manifest(manifest_path)
     manifest.update({"book": title, "author": author, "source": str(epub_path.resolve()),
-                     "voice_path": str(ACTIVE_VOICE) if ACTIVE_VOICE else None})
+                     "voice_path": str(ACTIVE_VOICE) if ACTIVE_VOICE else None,
+                     "acting_mode": ACTIVE_ACTING_MODE})
     manifest.setdefault("chapters", {})
 
     # Plan all selected chapters before CUDA model loading, so the GUI can show
@@ -379,6 +387,7 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
             "title": section.title, "signature": signature, "edits_digest": edits_digest,
             "samples": samples,
             "sample_rate": model.sr, "chunks": len(chunks), "wav": str(target),
+            "acting_mode": ACTIVE_ACTING_MODE,
             "pronunciation_snapshot": str(PRONUNCIATION_SNAPSHOT) if PRONUNCIATION_SNAPSHOT else None,
         }
         atomic_json(manifest_path, manifest)
@@ -622,7 +631,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
 
 def main():
     """Handle inspect, convert, rebuild, audit, and export actions from the CLI."""
-    global STUDIO_EVENTS, ACTIVE_VOICE, ACTIVE_PRONUNCIATIONS, PRONUNCIATION_SNAPSHOT
+    global STUDIO_EVENTS, ACTIVE_VOICE, ACTIVE_ACTING_MODE, ACTIVE_PRONUNCIATIONS, PRONUNCIATION_SNAPSHOT
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -632,6 +641,8 @@ def main():
     parser.add_argument("--no-export", action="store_true", help="Convert to chapter WAVs without encoding M4B")
     parser.add_argument("--output-name", help="Unique M4B basename; recommended for batch exports")
     parser.add_argument("--voice", type=Path, help="Alternate narrator reference WAV; omitted uses the original British narrator")
+    parser.add_argument("--acting-mode", choices=ACTING_MODES, default='standard',
+                        help="Optional single-narrator expressive quoted-dialogue delivery")
     parser.add_argument("--pronunciation-file", type=Path,
                         help="Immutable per-job spoken-text substitutions (new jobs only)")
     parser.add_argument("--studio-events", action="store_true", help="Print machine-readable JSON progress events")
@@ -640,6 +651,7 @@ def main():
     parser.add_argument("--replacement-text", help="New spoken text for render-chunk")
     args = parser.parse_args()
     STUDIO_EVENTS = args.studio_events
+    ACTIVE_ACTING_MODE = validate_acting_mode(args.acting_mode)
     if args.pronunciation_file is not None:
         PRONUNCIATION_SNAPSHOT = args.pronunciation_file.expanduser().resolve()
         ACTIVE_PRONUNCIATIONS = load_snapshot(PRONUNCIATION_SNAPSHOT)
