@@ -1007,8 +1007,27 @@ class Studio(QMainWindow):
         if book_id is not None:
             try:
                 self.converter = self.converter or load_converter()
+                book = self.store.book(book_id)
+                history = [dict(row) for row in self.store.jobs()]
+                history.extend(self.store.recorded_jobs_for_export(book_id))
                 self.quality_groups = collect_export_groups(
-                    self.store.jobs(), book_id, self.converter.book_folder)
+                    history, book_id, self.converter.book_folder)
+                # A narrator may have completed chapter WAVs even if every
+                # queue part was removed; those recordings still need QC.
+                base = self.converter.book_folder(Path(book['path']))
+                candidates = [base, *sorted((base / 'voices').glob('voice_*'))]
+                known = {str(group['folder'].resolve()) for group in self.quality_groups}
+                for folder in candidates:
+                    if not (folder / 'manifest.json').is_file() or str(folder.resolve()) in known:
+                        continue
+                    try:
+                        details = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
+                        voice = details.get('voice_path')
+                    except (ValueError, OSError, TypeError):
+                        voice = None
+                    self.quality_groups.append({
+                        'folder': folder, 'voice_path': voice, 'parts': [],
+                        'unfinished': [], 'indices': []})
                 for n, group in enumerate(self.quality_groups):
                     self.quality_narrator.addItem(
                         f"{voice_name(group['voice_path'])} · {len(group['parts'])} part(s)", n)
