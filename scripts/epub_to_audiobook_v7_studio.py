@@ -251,8 +251,10 @@ def chapter_signature(engine, section):
                  "assembly": [engine.FINAL_CONTINUATION_PAUSE, engine.EDGE_KEEP_SECONDS, engine.MAX_EDGE_TRIM_SECONDS, engine.FINAL_COMMA_PAUSE, engine.FINAL_SENTENCE_PAUSE,
                               engine.FINAL_DIALOGUE_PAUSE, engine.FINAL_PARAGRAPH_PAUSE,
                               engine.FINAL_SCENE_PAUSE, engine.LEADING_PAD_FINAL, engine.MAX_PEAK]}
-    if engine.ACTING_MODE != 'standard':
-        signature["acting_mode"] = engine.ACTING_MODE
+    # Offline editor/rebuild fixtures (and legacy engines) have no acting setting.
+    mode = getattr(engine, 'ACTING_MODE', 'standard')
+    if mode != 'standard':
+        signature["acting_mode"] = mode
     digest = hashlib.sha256(json.dumps(signature, ensure_ascii=False).encode()).hexdigest()
     return chunks, digest
 
