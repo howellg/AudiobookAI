@@ -36,8 +36,11 @@ class ChunkEditor(QDialog):
         # reindexing/rebuilding old parts with newer pronunciation rules.
         self.pronunciation_snapshot = None
         self.missing_pronunciation_snapshot = None
+        self.acting_mode = 'standard'
         try:
             manifest = json.loads((self.folder / 'manifest.json').read_text(encoding='utf-8'))
+            from audiobookai_acting import validate_acting_mode
+            self.acting_mode = validate_acting_mode(manifest.get('acting_mode', 'standard'))
             raw = manifest.get('chapters', {}).get(str(self.chapter), {}).get('pronunciation_snapshot')
             if raw:
                 saved = Path(raw)
@@ -120,6 +123,8 @@ class ChunkEditor(QDialog):
     def voice_args(self):
         """Encode the chapter’s fixed narrator selection for child converter calls."""
         arguments = ['--voice', self.voice_path] if self.voice_path else []
+        if self.acting_mode != 'standard':
+            arguments += ['--acting-mode', self.acting_mode]
         if self.pronunciation_snapshot:
             arguments += ['--pronunciation-file', self.pronunciation_snapshot]
         return arguments

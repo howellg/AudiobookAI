@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
+from audiobookai_acting import chunk_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_FILE = ROOT / "books" / "five_minute_test.txt"
@@ -37,6 +38,7 @@ NORMAL_OUTPUT = OUTPUT_DIR / "five_minute_test6_normal.wav"
 SPEED = 1.0  # Normal-speed output; pause targets are now applied directly.
 EXAGGERATION = 0.35
 CFG_WEIGHT = 0.3
+ACTING_MODE = 'standard'  # Opt-in, fixed per queued job by the Studio backend.
 TARGET_WORDS = 18
 MAX_CHUNK_WORDS = 18  # Conservative for 4 GB VRAM; split larger units.
 TOKEN_CAP = 350  # T3 tokens ~= 25/sec. Guard against runaway 800+ token samples.
@@ -179,11 +181,19 @@ def make_chunks(text: str) -> list[Chunk]:
     return output
 
 
+def delivery_settings(text: str) -> tuple[float, float]:
+    """Use the original narrator for all chunks; slightly act quoted dialogue."""
+    overrides = chunk_settings(ACTING_MODE, is_dialogue(text))
+    return (overrides.get("exaggeration", EXAGGERATION),
+            overrides.get("cfg_weight", CFG_WEIGHT))
+
+
 def cache_key(text: str) -> str:
-    # Exactly matches Tests 3/4, including the voice file mtime.
-    """Build the cache identity for this text and the current narration configuration."""
+    # In standard mode this is byte-for-byte compatible with all legacy keys.
+    """Build the cache identity for text, narrator, and the effective delivery."""
     st = VOICE_FILE.stat()
-    signature = (f"chatterbox-tts|{text}|{EXAGGERATION}|{CFG_WEIGHT}|"
+    exaggeration, cfg_weight = delivery_settings(text)
+    signature = (f"chatterbox-tts|{text}|{exaggeration}|{cfg_weight}|"
                  f"{VOICE_FILE.resolve()}|{st.st_size}|{st.st_mtime_ns}")
     return hashlib.sha256(signature.encode('utf-8')).hexdigest()[:24]
 
@@ -252,8 +262,9 @@ def capped_generate(model, text: str):
     model.t3.inference = capped_inference
     try:
         with torch.inference_mode():
+            exaggeration, cfg_weight = delivery_settings(text)
             return model.generate(text, audio_prompt_path=str(VOICE_FILE),
-                                  exaggeration=EXAGGERATION, cfg_weight=CFG_WEIGHT)
+                                  exaggeration=exaggeration, cfg_weight=cfg_weight)
     finally:
         model.t3.inference = original
 

@@ -39,6 +39,7 @@ from audiobookai_convenience import (parse_section_ranges, job_category,
                                      estimate_audio_duration, part_export_basename)
 from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_choices,
                                 import_voice, freeze_voice, voice_name)
+from audiobookai_acting import recorded_folders, delivery_label
 from audiobookai_production import cache_summary, remove_raw_cache
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import (collect_export_groups, verify_export_group,
@@ -143,7 +144,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.9.2')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -212,7 +213,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.9.2 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -493,6 +494,14 @@ class Studio(QMainWindow):
         self.voice_hint.setWordWrap(True)
         l.addWidget(self.voice_hint)
         self.reload_voices()
+        self.acting_checkbox = QCheckBox('Expressive dialogue · same narrator (experimental)')
+        self.acting_checkbox.setChecked(self.prefs.value('expressive_dialogue', False, type=bool))
+        self.acting_checkbox.setToolTip(
+            'Act quoted dialogue a little more expressively with the SAME narrator WAV. '
+            'Does not identify characters; saves separate chapter recordings and cache keys.')
+        self.acting_checkbox.toggled.connect(
+            lambda enabled: self.prefs.setValue('expressive_dialogue', enabled))
+        l.addWidget(self.acting_checkbox)
         self.section_table = QTableWidget(0, 3)
         self.section_table.setHorizontalHeaderLabels(['✓ / #', 'Chapter or EPUB section', 'Words'])
         self.setup_table(self.section_table)
@@ -776,19 +785,20 @@ class Studio(QMainWindow):
                 conv = self.converter or load_converter()
                 self.converter = conv
                 base = conv.book_folder(Path(book['path']))
-                paths = [base]
-                paths.extend(sorted((base / 'voices').glob('voice_*')))
-                for folder in paths:
+                for folder in recorded_folders(base):
                     manifest_path = folder / 'manifest.json'
                     if not manifest_path.is_file():
                         continue
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
                         voice = manifest.get('voice_path')
-                    except (OSError, ValueError, TypeError):
+                        mode = manifest.get('acting_mode', 'standard')
+                    except (OSError, ValueError, TypeError, AttributeError):
                         voice = None
-                    self.integrity_groups.append({'folder': folder, 'voice_path': voice})
-                    self.integrity_voice.addItem(voice_name(voice), len(self.integrity_groups) - 1)
+                        mode = 'expressive' if folder.name == 'expressive' else 'standard'
+                    self.integrity_groups.append({'folder': folder, 'voice_path': voice, 'acting_mode': mode})
+                    self.integrity_voice.addItem(voice_name(voice) + delivery_label(mode),
+                                                 len(self.integrity_groups) - 1)
                 if not self.integrity_groups:
                     self.integrity_groups.append({'folder': base, 'voice_path': None})
                     self.integrity_voice.addItem('British narrator (default)', 0)
@@ -826,7 +836,7 @@ class Studio(QMainWindow):
                     continue
                 try:
                     actual = conv.book_folder(Path(row['book_path']),
-                        Path(row['voice_path']) if row['voice_path'] else None)
+                        Path(row['voice_path']) if row['voice_path'] else None, row['acting_mode'])
                     if Path(actual).resolve() == folder.resolve():
                         active_jobs.append(dict(row))
                 except (OSError, ValueError):
@@ -835,7 +845,7 @@ class Studio(QMainWindow):
             for row in self.store.completed_parts(book['id']):
                 try:
                     actual = conv.book_folder(Path(row['book_path']),
-                        Path(row['voice_path']) if row['voice_path'] else None)
+                        Path(row['voice_path']) if row['voice_path'] else None, row['acting_mode'])
                     if Path(actual).resolve() == folder.resolve():
                         receipts.append(dict(row))
                 except (OSError, ValueError):
@@ -1042,7 +1052,7 @@ class Studio(QMainWindow):
                 # A narrator may have completed chapter WAVs even if every
                 # queue part was removed; those recordings still need QC.
                 base = self.converter.book_folder(Path(book['path']))
-                candidates = [base, *sorted((base / 'voices').glob('voice_*'))]
+                candidates = recorded_folders(base)
                 known = {str(group['folder'].resolve()) for group in self.quality_groups}
                 for folder in candidates:
                     if not (folder / 'manifest.json').is_file() or str(folder.resolve()) in known:
@@ -1050,14 +1060,16 @@ class Studio(QMainWindow):
                     try:
                         details = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
                         voice = details.get('voice_path')
-                    except (ValueError, OSError, TypeError):
+                        mode = details.get('acting_mode', 'standard')
+                    except (ValueError, OSError, TypeError, AttributeError):
                         voice = None
+                        mode = 'expressive' if folder.name == 'expressive' else 'standard'
                     self.quality_groups.append({
-                        'folder': folder, 'voice_path': voice, 'parts': [],
-                        'unfinished': [], 'indices': []})
+                        'folder': folder, 'voice_path': voice, 'acting_mode': mode,
+                        'parts': [], 'unfinished': [], 'indices': []})
                 for n, group in enumerate(self.quality_groups):
                     self.quality_narrator.addItem(
-                        f"{voice_name(group['voice_path'])} · {len(group['parts'])} part(s)", n)
+                        f"{voice_name(group['voice_path'])}{delivery_label(group.get('acting_mode', 'standard'))} · {len(group['parts'])} part(s)", n)
             except Exception as exc:
                 self.quality_status.setText(f'Cannot locate narrator audio: {exc}')
         self.quality_narrator.blockSignals(False)
@@ -1535,7 +1547,7 @@ class Studio(QMainWindow):
                 self.archive_groups = collect_export_groups(history, book_id, conv.book_folder)
                 for group in self.archive_groups:
                     self.archive_narrator.addItem(
-                        f"{voice_name(group['voice_path'])} — {len(group['parts'])} parts, "
+                        f"{voice_name(group['voice_path'])}{delivery_label(group.get('acting_mode', 'standard'))} — {len(group['parts'])} parts, "
                         f"{len(group['unfinished'])} unfinished")
             except Exception as exc:
                 self.archive_summary.setText(f'Unable to inspect editions: {exc}')
@@ -1839,13 +1851,12 @@ class Studio(QMainWindow):
                 try:
                     self.converter = self.converter or load_converter()
                     base = self.converter.book_folder(Path(book['path']))
-                    manifest_paths = [base / 'manifest.json',
-                                      *sorted((base / 'voices').glob('*/manifest.json'))]
+                    manifest_paths = [folder / 'manifest.json' for folder in recorded_folders(base)]
                     for path in manifest_paths:
                         if path.is_file():
                             info = json.loads(path.read_text(encoding='utf-8'))
                             self.reader_voice.addItem(
-                                voice_name(info.get('voice_path')), str(path))
+                                voice_name(info.get('voice_path')) + delivery_label(info.get('acting_mode', 'standard')), str(path))
                     if book_id == self.prefs.value('reader/book_id', -1, type=int):
                         previous = self.prefs.value('reader/manifest', '', type=str)
                         idx = self.reader_voice.findData(previous)
@@ -2714,7 +2725,8 @@ class Studio(QMainWindow):
         existing = [j for j in self.store.jobs() if j['book_id'] == self.current_book_id]
         occupied = {j['output_name'] for j in existing}
         voice_id = str(fixed_voice) if fixed_voice is not None else None
-        folder = self.converter.book_folder(Path(book['path']), fixed_voice)
+        acting_mode = 'expressive' if self.acting_checkbox.isChecked() else 'standard'
+        folder = self.converter.book_folder(Path(book['path']), fixed_voice, acting_mode)
         next_part = self.store.next_part_number(self.current_book_id, voice_id, folder)
         for i, numbers in enumerate(parts, next_part):
             span = f'{numbers[0]}-{numbers[-1]}' if len(numbers) > 1 else str(numbers[0])
@@ -2724,7 +2736,8 @@ class Studio(QMainWindow):
             # A new part captures the dictionary as it exists NOW. This file is
             # never updated on subsequent dictionary edits or GUI restarts.
             new_job_id = self.store.add_job(self.current_book_id, name, numbers, output_base,
-                                            fixed_voice, pronunciation_required=True)
+                                            fixed_voice, pronunciation_required=True,
+                                            acting_mode=acting_mode)
             try:
                 snapshot_for_job(new_job_id, book['path'])
             except Exception as exc:
@@ -2966,6 +2979,8 @@ class Studio(QMainWindow):
             return
         if snapshot is not None:
             arguments.extend(['--pronunciation-file', str(snapshot)])
+        if job['acting_mode'] != 'standard':
+            arguments.extend(['--acting-mode', job['acting_mode']])
         if job['voice_path']:
             voice = Path(job['voice_path'])
             if not voice.is_file():
@@ -3333,7 +3348,9 @@ class Studio(QMainWindow):
         if job['output_path'] and Path(job['output_path']).parent.is_dir():
             return Path(job['output_path']).parent
         self.converter = self.converter or load_converter()
-        return self.converter.book_folder(Path(job['book_path']))
+        return self.converter.book_folder(
+            Path(job['book_path']), Path(job['voice_path']) if job['voice_path'] else None,
+            job['acting_mode'])
 
     def open_selected_output_folder(self):
         """Show the selected job output directory in the file manager."""
@@ -3375,13 +3392,13 @@ class Studio(QMainWindow):
         try:
             self.converter = self.converter or load_converter()
             folder = self.converter.book_folder(Path(book['path']))
-            manifest_paths = [folder / 'manifest.json', *sorted((folder / 'voices').glob('*/manifest.json'))]
+            manifest_paths = [edition / 'manifest.json' for edition in recorded_folders(folder)]
             rows = []
             for manifest_path in manifest_paths:
                 if not manifest_path.is_file():
                     continue
                 manifest = json.loads(manifest_path.read_text())
-                label = voice_name(manifest.get('voice_path'))
+                label = voice_name(manifest.get('voice_path')) + delivery_label(manifest.get('acting_mode', 'standard'))
                 for key, chapter in manifest.get('chapters', {}).items():
                     rows.append((key, label, chapter))
         except Exception:
@@ -3461,7 +3478,7 @@ class Studio(QMainWindow):
             if not groups:
                 raise ValueError('No completed or queued parts exist for this book.')
             if len(groups) > 1:
-                choices = [f"{voice_name(g['voice_path'])} — "
+                choices = [f"{voice_name(g['voice_path'])}{delivery_label(g.get('acting_mode', 'standard'))} — "
                            f"{len(g['parts'])} part(s), {len(g['indices'])} sections, "
                            f"{len(g['unfinished'])} unfinished" for g in groups]
                 selected, accepted = QInputDialog.getItem(
@@ -3528,6 +3545,8 @@ class Studio(QMainWindow):
                      '--output-name', output_name, '--studio-events', '--export-progress']
         if group['voice_path']:
             arguments += ['--voice', str(group['voice_path'])]
+        if group.get('acting_mode', 'standard') != 'standard':
+            arguments += ['--acting-mode', group['acting_mode']]
         self.full_export_target = output
         self.full_export_buffer = ''
         self.full_export_started_at = time.monotonic()

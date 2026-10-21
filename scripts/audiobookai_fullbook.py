@@ -85,10 +85,17 @@ def collect_export_groups(jobs, book_id, folder_for_voice):
         if int(job['book_id']) != int(book_id):
             continue
         voice_path = job.get('voice_path') or None
-        folder = Path(folder_for_voice(Path(job['book_path']), Path(voice_path) if voice_path else None))
+        acting_mode = job.get('acting_mode') or 'standard'
+        voice = Path(voice_path) if voice_path else None
+        if acting_mode == 'standard':
+            folder = Path(folder_for_voice(Path(job['book_path']), voice))
+        elif acting_mode == 'expressive':
+            folder = Path(folder_for_voice(Path(job['book_path']), voice, acting_mode))
+        else:
+            raise ValueError(f"Invalid acting mode in queue job: {acting_mode!r}")
         key = str(folder.resolve())
         group = groups.setdefault(key, {
-            'folder': folder, 'voice_path': voice_path,
+            'folder': folder, 'voice_path': voice_path, 'acting_mode': acting_mode,
             'parts': [], 'unfinished': [], 'indices': set(),
         })
         # A missing narrator sample is reported separately during preflight.

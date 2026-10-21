@@ -79,7 +79,7 @@ class FakeConnection:
 class MySQLSyncParameterTests(unittest.TestCase):
     """Guard against the historical MySQL job INSERT placeholder mismatch."""
     def test_mysql_snapshot_with_a_narrator_job(self):
-        """Check that a narrator-bearing job inserts exactly 17 values for 17 SQL placeholders."""
+        """Check that a narrator-bearing job inserts exactly 18 values for 18 SQL placeholders."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Store(Path(tmp) / 'studio.sqlite3')
             try:
@@ -94,8 +94,8 @@ class MySQLSyncParameterTests(unittest.TestCase):
                 jobs_inserts = [(sql, rows) for sql, rows in fake_connection.calls
                                 if sql.lstrip().startswith('INSERT INTO jobs')]
                 self.assertEqual(len(jobs_inserts), 1)
-                self.assertEqual(jobs_inserts[0][0].count('%s'), 17)
-                self.assertEqual(len(jobs_inserts[0][1][0]), 17)
+                self.assertEqual(jobs_inserts[0][0].count('%s'), 18)
+                self.assertEqual(len(jobs_inserts[0][1][0]), 18)
             finally:
                 db.close()
 

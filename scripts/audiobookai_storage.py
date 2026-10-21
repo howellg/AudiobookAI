@@ -88,6 +88,7 @@ def save_password(cfg, password):
 
 
 from audiobookai_convenience import part_number_from_name, legacy_part_selection
+from audiobookai_acting import validate_acting_mode
 
 
 class Store:
@@ -157,10 +158,14 @@ class Store:
             'updated': 'TEXT',
             'voice_path': 'TEXT',
             'pronunciation_required': 'INTEGER NOT NULL DEFAULT 0',
+            'acting_mode': "TEXT NOT NULL DEFAULT 'standard'",
         }
         for field, column_sql in new_columns.items():
             if field not in cols:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {field} {column_sql}')
+        receipt_cols = {r['name'] for r in self.db.execute('PRAGMA table_info(completed_parts)')}
+        if 'acting_mode' not in receipt_cols:
+            self.db.execute("ALTER TABLE completed_parts ADD COLUMN acting_mode TEXT NOT NULL DEFAULT 'standard'")
         # Preserve verified exports from earlier versions in the permanent ledger.
         # Missing outputs and partially completed rows are NOT promoted.
         for old in self.db.execute(
@@ -234,7 +239,8 @@ class Store:
         self.db.execute('DELETE FROM books WHERE id=?', (book_id,))
         self.changed()
 
-    def add_job(self, book_id, name, indices, output_name, voice_path=None, pronunciation_required=False):
+    def add_job(self, book_id, name, indices, output_name, voice_path=None, pronunciation_required=False,
+                acting_mode='standard'):
         """Reserve a never-reused ID before freezing this queued part's pronunciation.
 
         Existing V2.5 snapshots are named job_<id>.json and are intentionally
@@ -244,6 +250,7 @@ class Store:
         beyond active rows, all retained snapshots, and a durable high-water
         mark, without changing or deleting any existing audio or rule files.
         """
+        validate_acting_mode(acting_mode)
         # Taking the write lock before reading max(id) avoids concurrent GUI
         # instances allocating the same row ID. Store mutations are committed
         # synchronously through changed() as in previous releases.
@@ -272,11 +279,11 @@ class Store:
                                 highest_snapshot = max(highest_snapshot, int(digits))
             new_id = max(highest_db, highest_recorded, highest_snapshot) + 1
             self.db.execute('''INSERT INTO jobs(
-                id,book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required)
-                VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                id,book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required,acting_mode)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
                 (new_id, book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
                  str(voice_path) if voice_path else None,
-                 1 if pronunciation_required else 0))
+                 1 if pronunciation_required else 0, acting_mode))
             self.db.execute('''INSERT INTO job_id_sequence(name,last_id) VALUES('jobs',?)
                 ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id''', (new_id,))
             self.changed()
@@ -333,16 +340,17 @@ class Store:
             part = found + 1
         self.db.execute('''INSERT INTO completed_parts
             (book_id,source_job_id,part_number,indices,output_name,output_path,
-             voice_path,finished,size_bytes)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             voice_path,finished,size_bytes,acting_mode)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(output_path) DO UPDATE SET
                 source_job_id=excluded.source_job_id,
                 part_number=excluded.part_number,
                 indices=excluded.indices, output_name=excluded.output_name,
                 voice_path=excluded.voice_path, finished=excluded.finished,
-                size_bytes=excluded.size_bytes''',
+                size_bytes=excluded.size_bytes, acting_mode=excluded.acting_mode''',
             (job['book_id'], job['id'], part, job['indices'], job['output_name'],
-             str(path), job['voice_path'], recorded_at or now(), path.stat().st_size))
+             str(path), job['voice_path'], recorded_at or now(), path.stat().st_size,
+             job['acting_mode'] if 'acting_mode' in job.keys() else 'standard'))
 
     def complete_job(self, job_id, output_path):
         """Atomically mark verified M4B complete AND preserve its part metadata.
@@ -447,6 +455,7 @@ class Store:
                 'id': None, 'book_id': book_id, 'name': output.stem,
                 'indices': json.dumps(indices), 'output_name': output.stem,
                 'voice_path': str(voice_path) if voice_path else None,
+                'acting_mode': 'standard',
             }, output)
             recorded.add(str(output))
             recovered += 1
@@ -466,6 +475,7 @@ class Store:
                 'id': f"saved-{receipt['id']}", 'book_id': book_id,
                 'book_path': receipt['book_path'], 'voice_path': receipt['voice_path'],
                 'status': 'complete', 'indices': receipt['indices'],
+                'acting_mode': receipt['acting_mode'],
             })
         return result
 
@@ -601,6 +611,7 @@ class MySQLMirror:
                     current_total INT NOT NULL DEFAULT 0,
                     updated DATETIME NULL,
                     voice_path LONGTEXT NULL,
+                    acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard',
                     INDEX idx_jobs_status (status,id),
                     FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
@@ -613,6 +624,7 @@ class MySQLMirror:
                     output_name TEXT NOT NULL,
                     output_path LONGTEXT NOT NULL,
                     voice_path LONGTEXT NULL,
+                    acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard',
                     finished DATETIME NOT NULL,
                     size_bytes BIGINT NOT NULL,
                     INDEX idx_completed_parts_book (book_id,part_number),
@@ -630,6 +642,10 @@ class MySQLMirror:
             cur.execute("SHOW COLUMNS FROM jobs LIKE 'voice_path'")
             if cur.fetchone() is None:
                 cur.execute('ALTER TABLE jobs ADD COLUMN voice_path LONGTEXT NULL')
+            for table in ('jobs', 'completed_parts'):
+                cur.execute(f"SHOW COLUMNS FROM {table} LIKE 'acting_mode'")
+                if cur.fetchone() is None:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard'")
             self.connection.commit()
             cur.close()
             self.last_error = None
@@ -678,20 +694,20 @@ class MySQLMirror:
                 cur.executemany('''INSERT INTO jobs
                     (id,book_id,name,indices_json,output_name,status,added,finished,
                      output_path,error,total_chunks,completed_chunks,current_section,
-                     current_chunk,current_total,updated,voice_path)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     current_chunk,current_total,updated,voice_path,acting_mode)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     [(j['id'],j['book_id'],j['name'],j['indices'],j['output_name'],j['status'],
                       j['added'],j['finished'],j['output_path'],j['error'],j['total_chunks'],
                       j['completed_chunks'],j['current_section'],j['current_chunk'],
-                      j['current_total'],j['updated'],j.get('voice_path')) for j in jobs])
+                      j['current_total'],j['updated'],j.get('voice_path'),j.get('acting_mode','standard')) for j in jobs])
             if completed_parts:
                 cur.executemany('''INSERT INTO completed_parts
                     (id,book_id,source_job_id,part_number,indices_json,output_name,
-                     output_path,voice_path,finished,size_bytes)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     output_path,voice_path,finished,size_bytes,acting_mode)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     [(p['id'],p['book_id'],p['source_job_id'],p['part_number'],
                       p['indices'],p['output_name'],p['output_path'],p['voice_path'],
-                      p['finished'],p['size_bytes']) for p in completed_parts])
+                      p['finished'],p['size_bytes'],p.get('acting_mode','standard')) for p in completed_parts])
             cur.execute('''INSERT INTO sync_state(source_name,synced_at,book_count,job_count)
                            VALUES (%s, %s, %s, %s)
                            ON DUPLICATE KEY UPDATE synced_at=VALUES(synced_at),
