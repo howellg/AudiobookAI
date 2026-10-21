@@ -111,6 +111,35 @@ def collect_export_groups(jobs, book_id, folder_for_voice):
     return [dict(group, indices=sorted(group['indices'])) for group in groups.values()]
 
 
+def recorded_export_indices(group, total_sections):
+    """Select every indexed chapter WAV for one narrator, independent of queue history.
+
+    A regenerated chapter may exist in the narrator's manifest even if its
+    original queue part was deleted or completed under another voice. Never
+    merge folders across narrators, or silently ignore broken manifest entries.
+    The ordinary export verification still checks completion state, WAVs,
+    sample rates, and per-chapter sample counts before exposing this option.
+    """
+    folder = group['folder']
+    try:
+        manifest = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ValueError('The chapter manifest is missing or unreadable.') from exc
+    recorded = manifest.get('chapters')
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError('No recorded chapter entries exist for this narrator.')
+    indices = []
+    for key in recorded:
+        if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
+            raise ValueError(f'Invalid chapter number in the manifest: {key!r}')
+        index = int(key)
+        if index < 1 or index > total_sections:
+            raise ValueError(f'Manifest chapter {index} is outside this EPUB (1–{total_sections}).')
+        indices.append(index)
+    candidate = dict(group, indices=sorted(indices))
+    return verify_export_group(candidate, total_sections)
+
+
 def verify_export_group(group, total_sections):
     """Return the exact ordered chapter numbers eligible for offline export.
 
