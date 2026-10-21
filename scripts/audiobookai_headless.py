@@ -109,6 +109,9 @@ def checked_job(job: dict, *, snapshot_dir=SNAPSHOTS, converter=CONVERTER):
         # the live dictionary if this required historical snapshot is absent.
         load_snapshot(snapshot)
         args.extend(("--pronunciation-file", str(snapshot)))
+    if job.get("acting_mode", "standard") != "standard":
+        from audiobookai_acting import validate_acting_mode
+        args.extend(("--acting-mode", validate_acting_mode(job["acting_mode"])))
     if job["voice_path"]:
         voice = Path(job["voice_path"])
         if not voice.is_file() or voice.suffix.lower() != ".wav":
