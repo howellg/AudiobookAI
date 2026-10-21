@@ -522,7 +522,7 @@ def ffconcat_quote(path: Path):
     return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
 
 
-def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, output_name=None):
+def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, output_name=None, *, report_progress=False):
     """Export chapter recordings under an explicit noncolliding part filename."""
     manifest = read_manifest(out / "manifest.json")
     recorded = manifest.get("chapters", {})
@@ -558,9 +558,45 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
            "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-ar", str(sr), str(partial)]
     check_stop()
     print(f"\nEncoding {len(chosen)} section(s) into M4B ...", flush=True)
-    emit_event("export_started", sections=len(chosen), path=str(output))
+    duration_seconds = elapsed_samples / sr
+    emit_event("export_started", sections=len(chosen), path=str(output),
+               duration_seconds=round(duration_seconds, 3))
     try:
-        subprocess.run(cmd, check=True)
+        if report_progress:
+            # The GUI's full-book export requests real FFmpeg encoding time,
+            # not guessed disk-size or chapter-count progress. Normal part
+            # exports retain their existing subprocess behavior.
+            from audiobookai_export_progress import export_progress_metrics
+            tracked_cmd = (cmd[:1] + ['-nostats', '-stats_period', '0.5',
+                                       '-progress', 'pipe:1'] + cmd[1:])
+            fields = {}
+            last_percent = 0
+            with subprocess.Popen(tracked_cmd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True,
+                                  encoding='utf-8', errors='replace',
+                                  bufsize=1) as process:
+                for raw in process.stdout:
+                    line = raw.strip()
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        if key in ('out_time', 'out_time_us', 'out_time_ms',
+                                   'speed', 'progress'):
+                            fields[key] = value
+                            if key == 'progress':
+                                metrics = export_progress_metrics(
+                                    fields, duration_seconds, last_percent)
+                                if metrics is not None:
+                                    last_percent = metrics['percent']
+                                    emit_event('export_progress', **metrics)
+                                fields = {}
+                            continue
+                    if line:
+                        print('FFmpeg: ' + line, flush=True)
+                return_code = process.wait()
+            if return_code:
+                raise subprocess.CalledProcessError(return_code, tracked_cmd)
+        else:
+            subprocess.run(cmd, check=True)
         # Reject zero-length or unplayable files before replacing any prior export.
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                                 "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
@@ -593,6 +629,7 @@ def main():
     parser.add_argument("--pronunciation-file", type=Path,
                         help="Immutable per-job spoken-text substitutions (new jobs only)")
     parser.add_argument("--studio-events", action="store_true", help="Print machine-readable JSON progress events")
+    parser.add_argument("--export-progress", action="store_true", help="Track FFmpeg M4B encoding when used with --studio-events")
     parser.add_argument("--chunk", type=int, help="1-based chunk number for render-chunk")
     parser.add_argument("--replacement-text", help="New spoken text for render-chunk")
     args = parser.parse_args()
@@ -642,7 +679,8 @@ def main():
             check_stop()
             export_m4b(epub_path, title, author, sections, selected, out, args.output_name)
     else:
-        export_m4b(epub_path, title, author, sections, selected, out, args.output_name)
+        export_m4b(epub_path, title, author, sections, selected, out, args.output_name,
+                   report_progress=args.export_progress and args.studio_events)
 
 
 if __name__ == "__main__":

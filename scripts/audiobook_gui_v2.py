@@ -143,7 +143,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.9.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.9.1')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -182,6 +182,12 @@ class Studio(QMainWindow):
         self.review_manifest = {}
         self.full_export_proc = None
         self.full_export_target = None
+        self.full_export_buffer = ''
+        self.full_export_started_at = None
+        self.full_export_percent = 0
+        self.full_export_encoded_seconds = 0.0
+        self.full_export_total_seconds = 0.0
+        self.full_export_speed = None
         self.archive_proc = None
         self.archive_output = None
         self.archive_groups = []
@@ -206,7 +212,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.9.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.9.1 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -241,6 +247,12 @@ class Studio(QMainWindow):
         self.make_archive_page()
         self.make_readalong_page()
         self.make_integrity_page()
+        self.full_export_status_progress = QProgressBar()
+        self.full_export_status_progress.setRange(0, 100)
+        self.full_export_status_progress.setFormat('M4B %p%')
+        self.full_export_status_progress.setFixedWidth(145)
+        self.statusBar().addPermanentWidget(self.full_export_status_progress)
+        self.full_export_status_progress.hide()
         self.statusBar().showMessage('Ready — existing V6 recordings and cache are untouched.')
         self.change_page(0)
         saved_book_id = self.prefs.value('last_book_id')
@@ -270,6 +282,10 @@ class Studio(QMainWindow):
         self.elapsed_timer.setInterval(500)
         self.elapsed_timer.timeout.connect(self.tick)
         self.elapsed_timer.timeout.connect(self.flush_generation_logs)
+        # Runs only during a complete-book export, not during narration.
+        self.full_export_ui_timer = QTimer(self)
+        self.full_export_ui_timer.setInterval(1000)
+        self.full_export_ui_timer.timeout.connect(self.update_full_export_progress_display)
         self.mirror_timer = QTimer(self)
         self.mirror_timer.setSingleShot(True)
         self.mirror_timer.timeout.connect(self.maybe_sync_mysql)
@@ -662,6 +678,16 @@ class Studio(QMainWindow):
             'Combine all finished part WAVs for one narrator into a single chaptered M4B; no GPU required'))
         export_actions.addStretch()
         l.addLayout(export_actions)
+        self.full_export_progress = QProgressBar()
+        self.full_export_progress.setRange(0, 100)
+        self.full_export_progress.setFormat('Encoding complete audiobook: %p%')
+        self.full_export_progress.hide()
+        l.addWidget(self.full_export_progress)
+        self.full_export_progress_label = QLabel('')
+        self.full_export_progress_label.setObjectName('muted')
+        self.full_export_progress_label.setWordWrap(True)
+        self.full_export_progress_label.hide()
+        l.addWidget(self.full_export_progress_label)
         note = QLabel('Narration preset: V7 Smooth — 18-word ceiling, 350-token cap, exaggeration 0.35. Narrators have isolated chapter audio and cached speech.')
         note.setWordWrap(True)
         note.setObjectName('muted')
@@ -3499,10 +3525,23 @@ class Studio(QMainWindow):
 
         arguments = ['-u', str(CONVERTER_FILE), 'export', str(epub),
                      '--chapters', ','.join(map(str, indices)),
-                     '--output-name', output_name]
+                     '--output-name', output_name, '--studio-events', '--export-progress']
         if group['voice_path']:
             arguments += ['--voice', str(group['voice_path'])]
         self.full_export_target = output
+        self.full_export_buffer = ''
+        self.full_export_started_at = time.monotonic()
+        self.full_export_percent = 0
+        self.full_export_encoded_seconds = 0.0
+        self.full_export_total_seconds = 0.0
+        self.full_export_speed = None
+        self.full_export_progress.setValue(0)
+        self.full_export_progress.show()
+        self.full_export_progress_label.setText('Preparing FFmpeg encoding progress…')
+        self.full_export_progress_label.show()
+        self.full_export_status_progress.setValue(0)
+        self.full_export_status_progress.show()
+        self.full_export_ui_timer.start()
         self.full_export_proc = QProcess(self)
         proc = self.full_export_proc
         proc.setProgram(sys.executable)
@@ -3517,13 +3556,63 @@ class Studio(QMainWindow):
         proc.start()
 
 
-    def read_complete_export_output(self):
-        """Capture short FFmpeg/converter output without refreshing Qt tables."""
-        if self.full_export_proc is not None:
-            message = bytes(self.full_export_proc.readAllStandardOutput()).decode('utf-8', errors='replace')
-            if message.strip():
-                self.write_log(message.rstrip())
+    def update_full_export_progress_display(self):
+        """Refresh human-readable encoding progress without blocking Qt."""
+        if self.full_export_started_at is None:
+            return
+        elapsed = max(0, time.monotonic() - self.full_export_started_at)
+        parts = [f'{self.full_export_percent}% encoded',
+                 f'{fmt_seconds(elapsed)} elapsed']
+        if self.full_export_total_seconds > 0:
+            parts.append(f'{fmt_seconds(self.full_export_encoded_seconds)} / '
+                         f'{fmt_seconds(self.full_export_total_seconds)} audio')
+            speed = self.full_export_speed
+            if speed and speed > 0:
+                remain = max(0.0, self.full_export_total_seconds -
+                             self.full_export_encoded_seconds) / speed
+                parts.append(f'≈ {fmt_seconds(remain)} remaining')
+                parts.append(f'{speed:.2f}× speed')
+        self.full_export_progress_label.setText(' · '.join(parts))
+        self.statusBar().showMessage(f'Complete M4B encoding: {self.full_export_percent}%')
 
+    def read_complete_export_output(self):
+        """Parse bounded progress events while preserving converter errors."""
+        if self.full_export_proc is None:
+            return
+        self.full_export_buffer += bytes(
+            self.full_export_proc.readAllStandardOutput()).decode(
+                'utf-8', errors='replace')
+        while '\n' in self.full_export_buffer:
+            line, self.full_export_buffer = self.full_export_buffer.split('\n', 1)
+            if line.startswith(EVENT_PREFIX):
+                kind = None
+                try:
+                    event = json.loads(line[len(EVENT_PREFIX):])
+                    kind = event.get('event')
+                    if kind == 'export_started':
+                        self.full_export_total_seconds = max(
+                            0.0, float(event.get('duration_seconds', 0)))
+                    elif kind == 'export_progress':
+                        percent = max(0, min(99, int(event['percent'])))
+                        self.full_export_percent = max(self.full_export_percent, percent)
+                        self.full_export_encoded_seconds = max(
+                            self.full_export_encoded_seconds,
+                            float(event['encoded_seconds']))
+                        self.full_export_total_seconds = max(
+                            self.full_export_total_seconds,
+                            float(event['duration_seconds']))
+                        self.full_export_speed = event.get('speed')
+                        self.full_export_progress.setValue(self.full_export_percent)
+                    elif kind == 'export_done':
+                        # Final 100% waits for verified successful process exit.
+                        self.full_export_progress_label.setText(
+                            'Encoded; final M4B validation complete. Finishing…')
+                except (ValueError, KeyError, TypeError, OverflowError, AttributeError):
+                    self.write_log('Complete export: invalid progress event ignored')
+                if kind != 'export_done':
+                    self.update_full_export_progress_display()
+            elif line.strip():
+                self.write_log(line.strip())
 
     def complete_export_error(self, error):
         """Report process errors, including a child that never started."""
@@ -3533,32 +3622,50 @@ class Studio(QMainWindow):
         self.statusBar().showMessage('Complete M4B export encountered a process error')
         self.write_log('Complete export process error: ' + proc.errorString())
         if error == QProcess.FailedToStart:
-            # Qt does not guarantee a finished signal when a process fails to
-            # launch, so release it here rather than leaving export blocked.
+            self.full_export_ui_timer.stop()
+            self.full_export_started_at = None
+            self.full_export_status_progress.hide()
+            self.full_export_progress_label.setText(
+                'Export could not start: ' + proc.errorString())
             self.full_export_proc = None
             self.full_export_target = None
             proc.deleteLater()
 
-
     def complete_export_finished(self, exit_code, exit_status):
-        """Release the background exporter and display the new archival M4B."""
+        """Finalize progress only after the verified complete M4B appears."""
         proc = self.full_export_proc
         if proc is None:
             return
         self.read_complete_export_output()
+        if self.full_export_buffer.strip():
+            self.write_log(self.full_export_buffer.strip())
+        self.full_export_buffer = ''
+        self.full_export_ui_timer.stop()
         target = self.full_export_target
         good = (exit_code == 0 and exit_status == QProcess.NormalExit
                 and target is not None and target.is_file())
+        elapsed = (max(0, time.monotonic() - self.full_export_started_at)
+                   if self.full_export_started_at is not None else 0)
         if good:
+            self.full_export_percent = 100
+            self.full_export_progress.setValue(100)
+            self.full_export_progress_label.setText(
+                f'Complete (100%) · {fmt_seconds(elapsed)} elapsed · '
+                f'{target.name}')
             self.statusBar().showMessage(f'Complete audiobook ready: {target}')
             self.write_log(f'Complete M4B saved: {target}')
         else:
+            self.full_export_progress_label.setText(
+                f'Export failed at {self.full_export_percent}% after '
+                f'{fmt_seconds(elapsed)}. Original chapter WAVs and M4B parts were preserved.')
             self.statusBar().showMessage('Complete audiobook export failed; original parts were preserved')
             self.write_log(f'Complete M4B export failed (exit code {exit_code}); see logs in Queue.')
             QMessageBox.warning(self, 'Complete export failed',
                 'The complete audiobook could not be exported.\n'
                 'Your chapter WAVs and existing M4B parts are unchanged.\n'
                 'Open Queue to inspect the converter log.')
+        self.full_export_started_at = None
+        self.full_export_status_progress.hide()
         self.full_export_proc = None
         self.full_export_target = None
         proc.deleteLater()
