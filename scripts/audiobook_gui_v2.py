@@ -46,7 +46,7 @@ from audiobookai_fullbook import (collect_export_groups, verify_export_group,
                                   export_coverage, export_coverage_message,
                                   compact_section_ranges)
 from audiobookai_archive import edition_info, save_edition, audio_duration
-from audiobookai_integrity import inspect_book
+from audiobookai_integrity import inspect_book, inspect_complete_m4b
 from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
                                       chunk_source_log, BufferedGenerationLog)
@@ -683,6 +683,8 @@ class Studio(QMainWindow):
         selectors.addWidget(self.integrity_voice, 2)
         l.addLayout(selectors)
         self.integrity_groups = []
+        self.integrity_last_audit = None
+        self.integrity_last_folder = None
         self.integrity_summary = QLabel('Select a book to inspect its narration.')
         self.integrity_summary.setWordWrap(True)
         l.addWidget(self.integrity_summary)
@@ -691,7 +693,10 @@ class Studio(QMainWindow):
         l.addWidget(self.integrity_progress)
         self.integrity_counts = QLabel('')
         self.integrity_counts.setWordWrap(True)
+        self.integrity_export_check = QLabel('Final M4B not yet checked with FFprobe.')
+        self.integrity_export_check.setWordWrap(True)
         l.addWidget(self.integrity_counts)
+        l.addWidget(self.integrity_export_check)
         l.addWidget(title_label('Production checklist', 14))
         self.integrity_checklist = QLabel('')
         self.integrity_checklist.setWordWrap(True)
@@ -699,6 +704,7 @@ class Studio(QMainWindow):
         l.addWidget(self.integrity_checklist)
         actions = QHBoxLayout()
         actions.addWidget(mk_button('Refresh integrity', self.integrity_refresh))
+        actions.addWidget(mk_button('Verify final M4B', self.integrity_verify_export))
         actions.addWidget(mk_button('Review chapters →', self.integrity_open_review))
         actions.addWidget(mk_button('Quality Control →', self.integrity_open_quality))
         actions.addWidget(mk_button('Export complete M4B →', self.integrity_open_export))
@@ -775,6 +781,9 @@ class Studio(QMainWindow):
     def integrity_refresh(self, *_):
         """Show section coverage without reading/decoding large WAV payloads."""
         book, narrator = self.integrity_current()
+        self.integrity_last_audit = None
+        self.integrity_last_folder = None
+        self.integrity_export_check.setText('Final M4B not yet checked with FFprobe.')
         if not book or not narrator:
             self.integrity_progress.setValue(0)
             self.integrity_table.setRowCount(0)
@@ -806,6 +815,8 @@ class Studio(QMainWindow):
                 except (OSError, ValueError):
                     continue
             audit = inspect_book(folder, book['sections'], active_jobs, receipts)
+            self.integrity_last_audit = audit
+            self.integrity_last_folder = folder
             expected = audit['expected']
             if not expected:
                 self.integrity_summary.setText('No chapter recordings or planned sections for this narrator yet.')
@@ -856,6 +867,25 @@ class Studio(QMainWindow):
         except Exception as exc:
             self.integrity_summary.setText(f'Integrity inspection failed: {exc}')
             self.integrity_progress.setValue(0)
+
+    def integrity_verify_export(self):
+        """Explicitly verify final container chapter count and duration."""
+        audit = self.integrity_last_audit
+        if not audit or not audit['expected']:
+            self.integrity_export_check.setText('No story range is selected for verification.')
+            return
+        outputs = audit['full_exports']
+        if not outputs:
+            self.integrity_export_check.setText('No complete M4B found for this narrator.')
+            return
+        target = max(outputs, key=lambda p: p.stat().st_mtime)
+        if not audit['wav_ready']:
+            self.integrity_export_check.setText(
+                'Chapter WAV inventory is incomplete. Repair chapters before confirming final export integrity.')
+            return
+        result = inspect_complete_m4b(
+            target, audit['expected'], audit['expected_seconds'])
+        self.integrity_export_check.setText(f'{target.name}: {result}')
 
     def integrity_open_review(self):
         book, _ = self.integrity_current()
