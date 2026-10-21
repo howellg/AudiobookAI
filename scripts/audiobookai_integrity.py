@@ -7,6 +7,7 @@ separate signals; none implies another has succeeded.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -101,7 +102,6 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
                 qc = f'{errors} errors, {warnings} warnings' if errors or warnings else 'Passed'
         except (OSError, ValueError, KeyError, TypeError):
             qc = 'Invalid report'
-    completed_file = folder / 'manifest.json'
     full_exports = [p for p in folder.glob('*_COMPLETE.m4b') if p.is_file() and p.stat().st_size > 1024]
     return {
         'total': total, 'expected': sorted(expected_set), 'outside': outside,
@@ -112,4 +112,35 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
         'finished_parts': sum(j.get('status') == 'complete' for j in jobs),
         'receipt_parts': len(receipts), 'verified_receipt_parts': len(verified_receipts),
         'qc': qc, 'full_exports': full_exports,
+        'expected_seconds': sum(recorded[str(i)]['samples'] / recorded[str(i)]['sample_rate'] for i in good),
     }
+
+def inspect_complete_m4b(path, expected_chapters, expected_seconds=None):
+    """Check an existing M4B's readable audio stream and chapter-marker count.
+
+    This is container integrity only, not a decoded-audio or per-chapter content
+    comparison. ffprobe runs only on explicit user request in the dashboard.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return 'M4B missing'
+    try:
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries',
+             'format=duration:stream=codec_type:chapter=start_time,end_time',
+             '-show_chapters', '-show_streams', '-show_format', '-of', 'json', str(path)],
+            capture_output=True, text=True, check=True, timeout=45)
+        data = json.loads(probe.stdout)
+        streams = data.get('streams', [])
+        if not any(s.get('codec_type') == 'audio' for s in streams):
+            return 'Failed: no audio stream'
+        chapters = data.get('chapters', [])
+        if len(chapters) != len(expected_chapters):
+            return f'Failed: {len(chapters)} chapter markers; expected {len(expected_chapters)}'
+        if expected_seconds is not None:
+            duration = float(data.get('format', {}).get('duration', 0))
+            if abs(duration - expected_seconds) > max(5.0, 0.005 * expected_seconds):
+                return f'Failed: duration differs from recorded chapters ({duration:.1f}s vs {expected_seconds:.1f}s)'
+        return f'Passed container check: {len(chapters)} chapter markers, readable audio stream'
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, TypeError) as exc:
+        return f'Cannot verify M4B: {exc}'
