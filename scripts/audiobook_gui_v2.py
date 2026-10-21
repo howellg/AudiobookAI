@@ -843,7 +843,8 @@ class Studio(QMainWindow):
                 f"Recorded {completed}/{count} ({completed * 100 / count:.1f}%)  ·  "
                 f"Queued/unfinished {len(audit['queued'])}  ·  Missing/damaged {len(audit['missing'])}  ·  "
                 f"Not started {len(audit['not_started'])}  ·  "
-                f"Completed parts on disk {audit['verified_receipt_parts']}/{audit['receipt_parts']}")
+                f"Completed queue parts {audit['finished_parts']}/{audit['queue_parts']}  ·  "
+                f"Saved part receipts on disk {audit['verified_receipt_parts']}/{audit['receipt_parts']}")
             outside = compact_section_ranges(audit['outside']) if audit['outside'] else 'none'
             missing = compact_section_ranges(audit['missing']) if audit['missing'] else 'none'
             source_ready = Path(book['path']).is_file()
