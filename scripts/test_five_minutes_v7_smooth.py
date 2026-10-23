@@ -25,6 +25,7 @@ import torch
 import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
 from audiobookai_acting import chunk_settings
+from audiobookai_cache import ensure_cache_directory, cache_error_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_FILE = ROOT / "books" / "five_minute_test.txt"
@@ -288,6 +289,9 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
     cache_write=False; they NEVER alter the global shared narration cache.
     """
     from audiobookai_production import quality_report
+    # Check the external cache link BEFORE loading or synthesizing speech.
+    # A temporarily unmounted SSD must never be mistaken for an empty cache.
+    ensure_cache_directory(CACHE_DIR)
     path = CACHE_DIR / f'{cache_key(text)}.wav'
     # Reusing identical voice/text/settings avoids another costly GPU inference.
     if not force and path.is_file():
@@ -308,7 +312,8 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
                 quarantine.mkdir(parents=True, exist_ok=True)
                 path.rename(quarantine / f'{path.stem}.{time.time_ns()}.wav')
         except (OSError, RuntimeError, ValueError) as exc:
-            print(f'Cache read failed: {exc}; attempting regeneration.', flush=True)
+            print(f'Cache read failed for {path.name}: '
+                  f'{cache_error_summary(exc)}; attempting regeneration.', flush=True)
             # Leave the invalid file untouched unless its format could be read.
     tries = 2 if len(text.split()) >= 2 else 3
     last_error = None
