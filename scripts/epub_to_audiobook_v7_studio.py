@@ -25,6 +25,8 @@ import re
 import subprocess
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -200,6 +202,43 @@ def load_epub(epub_path: Path):
     return title, author, sections
 
 
+def ensure_cache_directory(path: Path) -> Path | None:
+    """Create the raw speech cache, preserving an unexpected regular file safely.
+
+    The cache is normally a directory. If a regular file accidentally occupies
+    its pathname, relocate that file to a uniquely named sibling instead of
+    deleting or overwriting it. Never modify symlinks: they may represent an
+    intentionally configured cache on another drive.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return None
+    except FileExistsError as exc:
+        if path.is_dir():
+            return None  # Another process may have created it in the meantime.
+        if path.is_symlink():
+            raise RuntimeError(
+                f"Speech cache path is a symlink that does not lead to a directory: {path}. "
+                "Restore its target or move the symlink aside before retrying."
+            ) from exc
+        if not path.is_file():
+            raise RuntimeError(
+                f"Speech cache path is not a directory or regular file: {path}"
+            ) from exc
+
+        # Keep the original bytes, even if this file is not a real cache.
+        backup = path.with_name(
+            f"{path.name}.conflict-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+        )
+        path.rename(backup)
+        path.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Speech cache repair: a file occupied {path}; preserved it at {backup} "
+            "and created a new cache directory.", flush=True
+        )
+        return backup
+
+
 def load_engine():
     """Load the narration module lazily so inspection does not load the GPU model."""
     if not ENGINE_FILE.exists():
@@ -214,7 +253,7 @@ def load_engine():
     module.ACTING_MODE = validate_acting_mode(ACTIVE_ACTING_MODE)
     if not module.VOICE_FILE.is_file():
         raise SystemExit(f"Missing narrator sample: {module.VOICE_FILE}")
-    module.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_cache_directory(module.CACHE_DIR)
     return module
 
 
