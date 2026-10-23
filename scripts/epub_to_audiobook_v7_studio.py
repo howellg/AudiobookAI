@@ -32,6 +32,7 @@ import audiobookai_production as production
 from audiobookai_convenience import readable_m4b_basename
 from audiobookai_pronunciation import load_snapshot, apply_rules, rules_digest
 from audiobookai_acting import ACTING_MODES, validate_acting_mode
+from audiobookai_cache import ensure_cache_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOKS = ROOT / "books"
@@ -214,7 +215,7 @@ def load_engine():
     module.ACTING_MODE = validate_acting_mode(ACTIVE_ACTING_MODE)
     if not module.VOICE_FILE.is_file():
         raise SystemExit(f"Missing narrator sample: {module.VOICE_FILE}")
-    module.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_cache_directory(module.CACHE_DIR)
     return module
 
 
