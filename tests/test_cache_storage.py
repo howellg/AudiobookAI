@@ -76,10 +76,10 @@ class CacheStorageTests(unittest.TestCase):
                 f'from pathlib import Path\nVOICE_FILE = Path({str(voice)!r})\n'
                 f'CACHE_DIR = Path({str(linked)!r})\n'
             )
-            with patch.object(converter, 'ENGINE_FILE', engine), \\
-                 patch.object(converter, 'ACTIVE_VOICE', None):
-                with self.assertRaisesRegex(RuntimeError, 'cache storage is unavailable'):
-                    converter.load_engine()
+            with patch.object(converter, 'ENGINE_FILE', engine):
+                with patch.object(converter, 'ACTIVE_VOICE', None):
+                    with self.assertRaisesRegex(RuntimeError, 'cache storage is unavailable'):
+                        converter.load_engine()
             self.assertTrue(linked.is_symlink())
 
 
