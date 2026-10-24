@@ -28,6 +28,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from audiobookai_models import prefer_local_models, load_chatterbox
+# Configure offline Hub access before any lazily imported Chatterbox dependencies.
+prefer_local_models()
+
 import audiobookai_production as production
 from audiobookai_convenience import readable_m4b_basename
 from audiobookai_pronunciation import load_snapshot, apply_rules, rules_digest
@@ -354,8 +358,7 @@ def generate_sections(epub_path: Path, title, author, sections, chosen, out: Pat
         print(f"\n[{index}/{len(sections)}] {section.title} — {len(chunks)} chunks", flush=True)
         emit_event("chapter_started", index=index, title=section.title, chunks=len(chunks))
         if model is None:
-            from chatterbox.tts import ChatterboxTTS
-            model = ChatterboxTTS.from_pretrained(device=engine.DEVICE)
+            model = load_chatterbox(engine.DEVICE)
             print(f"Chatterbox loaded on {engine.DEVICE}", flush=True)
         # Only one chapter held in RAM at a time. Raw chunks cached as generated.
         recordings = []
@@ -480,11 +483,10 @@ def render_replacement(sections, index, number, text, out):
     if not 1 <= number <= len(chunks):
         raise ValueError(f'Chunk must be between 1 and {len(chunks)}')
     production.save_index(out, index, section.title, chunks, engine, signature)
-    from chatterbox.tts import ChatterboxTTS
     original = chunks[number-1].text
     relative, destination = production.take_destination(out, index, number)
     print(f'Generating replacement for chapter {index}, chunk {number}: {text[:100]}', flush=True)
-    model = ChatterboxTTS.from_pretrained(device=engine.DEVICE)
+    model = load_chatterbox(engine.DEVICE)
     audio = engine.generate_cached(model, text, model.sr, force=True, cache_write=False)
     partial = destination.with_name(destination.stem + '.partial.wav')
     try:

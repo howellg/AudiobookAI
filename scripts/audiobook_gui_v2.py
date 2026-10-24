@@ -144,7 +144,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.1')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -190,6 +190,8 @@ class Studio(QMainWindow):
         self.full_export_total_seconds = 0.0
         self.full_export_speed = None
         self.archive_proc = None
+        self.model_proc = None
+        self.model_action = None
         self.archive_output = None
         self.archive_groups = []
         self._progress_last_values = {}
@@ -213,7 +215,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.1 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -2110,6 +2112,40 @@ class Studio(QMainWindow):
         grid.setColumnStretch(1, 1)
         l.addLayout(grid)
 
+        l.addWidget(title_label('Chatterbox models · offline-first', 14))
+        self.model_status = QLabel(
+            'Narration uses locally cached Chatterbox models by default; no '
+            'Hugging Face connection is required once the model is downloaded.')
+        self.model_status.setWordWrap(True)
+        self.model_status.setObjectName('muted')
+        l.addWidget(self.model_status)
+        model_buttons = QHBoxLayout()
+        self.model_check_btn = mk_button(
+            'Check local models', lambda: self.start_model_action('check'))
+        self.model_download_btn = mk_button(
+            'Download missing files…', lambda: self.start_model_action('download'))
+        self.model_refresh_btn = mk_button(
+            'Refresh all model files…', lambda: self.start_model_action('refresh'))
+        for control in (self.model_check_btn, self.model_download_btn,
+                        self.model_refresh_btn):
+            model_buttons.addWidget(control)
+        model_buttons.addStretch()
+        l.addLayout(model_buttons)
+        model_tip = QLabel(
+            'Checking uses only your local cache. Download/refresh explicitly '
+            'contacts Hugging Face and may transfer approximately 3 GB of '
+            'model weights. These actions do not delete your EPUBs, chapter WAVs, '
+            'speech caches or existing queued jobs.')
+        model_tip.setObjectName('muted')
+        model_tip.setWordWrap(True)
+        l.addWidget(model_tip)
+        self.model_log = QPlainTextEdit()
+        self.model_log.setReadOnly(True)
+        self.model_log.setMaximumHeight(125)
+        self.model_log.document().setMaximumBlockCount(60)
+        self.model_log.hide()
+        l.addWidget(self.model_log)
+
         l.addWidget(title_label('MySQL connection', 14))
         self.mysql_status_label = QLabel('MySQL not configured')
         self.mysql_status_label.setWordWrap(True)
@@ -2196,6 +2232,99 @@ class Studio(QMainWindow):
         backup_tip.setObjectName('muted')
         l.addWidget(backup_tip)
         l.addStretch()
+
+    def start_model_action(self, action):
+        """Run explicit model maintenance in a process separate from generation."""
+        if self.model_proc is not None:
+            self.statusBar().showMessage('A model check or download is already running.')
+            return
+        if self.proc is not None or headless_runner_active():
+            QMessageBox.information(
+                self, 'Generation in progress',
+                'Safely finish or stop the current converter before changing '
+                'Chatterbox model files. Your queued jobs will be preserved.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible() and editor.proc is not None:
+            QMessageBox.information(self, 'Audio editor busy',
+                                    'Finish generating the edited take first.')
+            return
+        if action == 'refresh':
+            choice = QMessageBox.question(
+                self, 'Refresh Chatterbox model files',
+                'Redownload the latest Chatterbox model weights from Hugging Face? '
+                'This requires internet and may transfer about 3 GB. Existing '
+                'speech chunks and audiobooks will not be deleted.',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if choice != QMessageBox.Yes:
+                return
+        self.model_action = action
+        self.model_log.clear()
+        self.model_log.show()
+        self.model_status.setText({
+            'check': 'Checking locally cached Chatterbox model files (no network)…',
+            'download': 'Downloading missing model files from Hugging Face…',
+            'refresh': 'Refreshing Chatterbox model files from Hugging Face…',
+        }[action])
+        for button in (self.model_check_btn, self.model_download_btn,
+                       self.model_refresh_btn):
+            button.setEnabled(False)
+        process = QProcess(self)
+        self.model_proc = process
+        process.setProgram(sys.executable)
+        process.setArguments(['-u', str(SCRIPTS / 'audiobookai_models.py'), action])
+        process.setWorkingDirectory(str(ROOT))
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(self.read_model_output)
+        process.finished.connect(self.model_action_finished)
+        process.errorOccurred.connect(self.model_action_error)
+        process.start()
+
+    def read_model_output(self):
+        """Show bounded download feedback without blocking the desktop GUI."""
+        if self.model_proc is None:
+            return
+        data = bytes(self.model_proc.readAllStandardOutput()).decode(
+            'utf-8', errors='replace')
+        if data.strip():
+            self.model_log.appendPlainText(data.rstrip())
+
+    def finish_model_process(self):
+        """Release a completed worker and reactivate all maintenance buttons."""
+        process = self.model_proc
+        self.model_proc = None
+        self.model_action = None
+        for button in (self.model_check_btn, self.model_download_btn,
+                       self.model_refresh_btn):
+            button.setEnabled(True)
+        if process is not None:
+            process.deleteLater()
+
+    def model_action_finished(self, exit_code, exit_status):
+        """Report offline cache readiness or a genuine download failure."""
+        if self.model_proc is None:
+            return
+        self.read_model_output()
+        good = exit_code == 0 and exit_status == QProcess.NormalExit
+        if good:
+            self.model_status.setText(
+                'Chatterbox model files verified locally. Generation can run offline.')
+            self.statusBar().showMessage('Chatterbox model cache ready for offline narration.')
+        else:
+            self.model_status.setText(
+                'Model check/download was unsuccessful. See details below. '
+                'Existing audiobook data is unchanged.')
+            self.statusBar().showMessage('Chatterbox model maintenance failed.')
+        self.finish_model_process()
+
+    def model_action_error(self, error):
+        """Recover a model worker that failed to launch."""
+        if self.model_proc is None or error != QProcess.FailedToStart:
+            return
+        self.model_log.appendPlainText(
+            'Model helper failed to start: ' + self.model_proc.errorString())
+        self.model_status.setText('Unable to start model helper. Check your installation.')
+        self.finish_model_process()
 
     def mark_mysql_dirty(self):
         """Flag the optional SQL mirror for a later refresh after a SQLite write."""
@@ -2944,6 +3073,11 @@ class Studio(QMainWindow):
                        'converter for the same cache. Resume GUI generation only after it ends.')
             return
         if self.proc is not None:
+            return
+        if self.model_proc is not None:
+            self.run_queue = False
+            QMessageBox.information(self, 'Model maintenance in progress',
+                'Finish checking or downloading the Chatterbox model before generating.')
             return
         editor = getattr(self, 'editor_dialog', None)
         if editor is not None and editor.isVisible():
@@ -3861,6 +3995,11 @@ class Studio(QMainWindow):
         if self.archive_proc is not None:
             QMessageBox.information(self, 'Archive export in progress',
                 'Finish the archival M4B export before closing AudiobookAI.')
+            event.ignore()
+            return
+        if self.model_proc is not None:
+            QMessageBox.information(self, 'Model maintenance in progress',
+                'Finish checking or downloading Chatterbox models before closing Studio.')
             event.ignore()
             return
         if self.full_export_proc is not None:

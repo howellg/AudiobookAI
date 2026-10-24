@@ -21,6 +21,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from audiobookai_models import prefer_local_models, load_chatterbox
+# Set before Chatterbox/Hugging Face imports, including direct engine execution.
+prefer_local_models()
+
 import torch
 import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
@@ -451,7 +455,7 @@ def main():
             path.unlink()
             print(f'Cleared chunk {index} from cache')
     started = time.monotonic()
-    model = ChatterboxTTS.from_pretrained(device=DEVICE)
+    model = load_chatterbox(DEVICE)
     recordings = []
     for i, chunk in enumerate(chunks, 1):
         print(f'\nChunk {i}/{len(chunks)}: {chunk.text[:120]}')

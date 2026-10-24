@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.1**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.10.1 offline-first Chatterbox models:** The converter and standalone V7 engine set `HF_HUB_OFFLINE=1` by default *before Hugging Face libraries load*, so completed model downloads run entirely from the local cache without startup network checks. Existing explicit environment overrides remain respected. **Settings → Chatterbox models** adds **Check local models** (never uses internet), **Download missing files** (explicit online download) and **Refresh all model files** (explicit online refresh of about 3 GB). These run in a separate subprocess without altering your queued jobs, generated speech cache, EPUBs, or chapter WAVs. The app displays a useful missing-cache error when the models have not been downloaded; new installs must download the model before their first offline generation. Model updates do not automatically invalidate existing narration or regenerate speech.
 - **V2.10.0 experimental single-narrator acting:** On Generate, optionally check **Expressive dialogue · same narrator** before adding chapters to the queue. Chatterbox still uses exactly the selected narrator reference WAV, but applies a modest expressiveness adjustment to quoted-dialogue chunks recognized by the existing heuristic splitter. Normal prose and all default jobs retain their original acoustic settings and cache identities. The mode is frozen in each SQLite queue job and preserved by the headless runner and completed-part receipts. Expressive chapter WAVs/manifests are stored under `performances/expressive/` so they do not overwrite the ordinary narrator edition. Review, Read Along, Quality Control, Book Integrity, Archive, and full-book export can discover the separate edition. **Limitations:** This does not detect character identities, add character-specific pitches/accents, or necessarily classify embedded/multisentence dialogue perfectly; review a short sample before queueing a novel. The effect is not guaranteed to sound better for every reference voice.
 - **Resume and recovery:** Reuse cached speech chunks after interruptions; automatically retry and split chunks in some recoverable generation failures.
 - **Audio review and editing:** Inspect completed chapter audio, edit the spoken text for individual chunks, generate alternate takes, restore previous takes, and rebuild audio from saved recordings.
@@ -46,6 +47,25 @@ python scripts/audiobook_gui_v2.py
 ```
 
 For a fresh clone, follow [INSTALL.md](INSTALL.md) first. You must provide your own DRM-free EPUB and at least one suitable narrator WAV; neither is distributed with this repository.
+
+### Model downloads and offline use (V2.10.1)
+
+On a new installation, connect to the internet and use **Settings → Chatterbox models → Download missing files…** before generating for the first time. Once all five model files are cached, the normal converter works without internet access. The initial model download is approximately 3 GB.
+
+You can check the cache without connecting to the internet:
+
+```fish
+python scripts/audiobookai_models.py check
+```
+
+Explicit online maintenance is also available without starting the GUI:
+
+```fish
+python scripts/audiobookai_models.py download  # Fetch missing/latest required files
+python scripts/audiobookai_models.py refresh   # Force a fresh download of all model files
+```
+
+These are optional maintenance commands: generation, EPUB import, and normal M4B export do not run them automatically. The application sets `HF_HUB_OFFLINE=1` as its default for generation; you can intentionally override this with `HF_HUB_OFFLINE=0`, but using the separate maintenance action is recommended.
 
 ## Readable M4B part filenames and permanent completion history (V2.8.4)
 
