@@ -243,7 +243,26 @@ missing or damaged M4B was completed.
 these receipts: include it in your metadata backups. You do not need to
 keep dozens of **completed queue rows** to preserve part numbering.
 
-**Do not use a 15-chapter overnight queue as your first installation test.** The first run downloads model files and is the best time to check CUDA, voice-file parsing, and chapter boundaries.
+**Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
+
+### V2.10.1: Offline-first model setup
+
+AudiobookAI's converter uses locally cached Chatterbox files by default and does not check the Hugging Face Hub when starting each queued part. You **must explicitly download the model before the first generation** on a fresh installation:
+
+1. Connect to the internet and open **Studio → Settings → Chatterbox models**.
+2. Click **Download missing files…** and wait for the "verified locally" message.
+3. Click **Check local models** to verify the complete cache *without* accessing the internet.
+4. You can then generate offline. **Refresh all model files…** deliberately redownloads approximately 3 GB from Hugging Face; use it only when needed.
+
+The same maintenance operations are available from the repository root with your existing virtual environment active:
+
+```bash
+python scripts/audiobookai_models.py check       # Offline check, never downloads
+python scripts/audiobookai_models.py download    # Explicit online fetch
+python scripts/audiobookai_models.py refresh     # Explicit full online refresh
+```
+
+Generation sets `HF_HUB_OFFLINE=1` by default before importing Chatterbox/Hugging Face, including the headless queue runner. A missing model produces instructions to use the download action instead of hanging on network access. Your model cache usually lives under `~/.cache/huggingface/hub` unless you have configured Hugging Face cache environment variables. You can still override the default by explicitly launching with `HF_HUB_OFFLINE=0`; the Settings buttons are preferred for updates. Model downloads do not replace your EPUB files, speech cache, or completed M4Bs.
 
 ### Optional command-line check
 
@@ -352,7 +371,7 @@ Before any significant upgrade, close active conversions and back up the SQLite 
 | CUDA unavailable / CPU generation is extremely slow | Verify `nvidia-smi`, `torch.cuda.is_available()`, and matching Torch/TorchAudio installations. |
 | Missing narrator sample | Place your WAV in `voices/` or import/select an alternate WAV through Generate. |
 | EPUB chapters incorrectly grouped | Run `inspect` and check section numbering. EPUB structures vary; do not assume every XHTML file is one chapter. |
-| Model download warning / slow first run | Chatterbox model files may need an initial Hugging Face download. An authentication warning is not necessarily a fatal error. |
+| Missing Chatterbox model files / cannot generate offline | In V2.10.1 open **Settings → Chatterbox models → Download missing files…** while connected. Use **Check local models** to verify offline readiness; normal conversion does not download automatically. |
 | MySQL offline or sync pending | SQLite still holds the local queue. Check server availability, credentials, and `sql/setup_mysql.sql`; do not delete the SQLite database. |
 | `none_dealloc` / `SIGABRT` native GUI crash | Check for **PySide6 / Shiboken 6.12.x**. Pin the matched stack to **6.11.2** as shown in §4.2. The downgrade improved long-run stability on the development machine but is not a confirmed root-cause fix. Check for a surviving converter process before resuming an existing job; the Qt-free headless runner is available for unattended work. Save the traceback and exact versions. |
 | Reused audio has the wrong narrator | Confirm the job narrator and voice snapshot, and avoid changing reference WAVs mid-job. |
