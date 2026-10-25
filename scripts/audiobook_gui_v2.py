@@ -71,55 +71,82 @@ EVENT_PREFIX = 'AUDIOBOOKAI_EVENT '
 
 
 class QueueTableWidget(QTableWidget):
-    """Translate a row drag into a requested persistent queue reorder.
+    """Request a queue reorder without letting Qt move or delete table items.
 
-    Do not let Qt internally move QTableWidgetItems: SQLite owns the ordering
-    and refresh_jobs() synchronizes the view after a successful transaction.
+    The table represents SQLite rows and is not its own authoritative model.
+    QTableWidget's native InternalMove implementation removes source cells
+    *after* dropEvent returns on a successful MoveAction. A manual refresh made
+    during dropEvent is therefore too early, causing phantom blank rows.
     """
 
     reorder_requested = Signal(int, int)  # job ID, zero-based destination row
+    drag_finished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(0, 7, parent)
+        self._dragged_job_id = None
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setDefaultDropAction(Qt.MoveAction)
+        # A copy-only drag signals an intended reorder, never a native row
+        # removal or duplication. SQLite and refresh_jobs own actual changes.
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setDragDropOverwriteMode(False)
         self.setDropIndicatorShown(True)
 
+    def startDrag(self, supported_actions):
+        """Freeze the source ID and prohibit Qt's destructive MoveAction."""
+        row = self.currentRow()
+        first = self.item(row, 0) if row >= 0 else None
+        status = self.item(row, 4) if row >= 0 else None
+        if (first is None or status is None or
+                status.text().casefold() != 'queued' or not self.dragEnabled()):
+            return
+        self._dragged_job_id = first.data(Qt.UserRole)
+        if self._dragged_job_id is None:
+            return
+        try:
+            # Never pass Qt.MoveAction: QAbstractItemView::startDrag removes
+            # source cells after a successful move, *after* dropEvent returns.
+            super().startDrag(Qt.CopyAction)
+        finally:
+            self._dragged_job_id = None
+            # Also heal the view after Qt's nested drag loop has exited.
+            self.drag_finished.emit()
+
     def dropEvent(self, event):
-        if event.source() is not self or not self.dragEnabled():
+        """Interpret where the queued ID was dropped; do not mutate items."""
+        job_id = self._dragged_job_id
+        if event.source() is not self or job_id is None or not self.dragEnabled():
             event.ignore()
             return
-        source = self.currentRow()
+        source = next((r for r in range(self.rowCount())
+                       if (self.item(r, 0) is not None and
+                           self.item(r, 0).data(Qt.UserRole) == job_id)), -1)
         if source < 0 or self.isRowHidden(source):
-            event.ignore()
-            return
-        source_item = self.item(source, 0)
-        if source_item is None:
-            event.ignore()
-            return
-        job_id = source_item.data(Qt.UserRole)
-        if job_id is None:
             event.ignore()
             return
 
         point = event.position().toPoint()
         row = self.rowAt(point.y())
         if row < 0:
-            # Drag below the last row to append. Drag over the header/top
-            # of the empty viewport to prepend.
+            # Dropping in empty viewport space below the last visible item
+            # appends the row, while an above-viewport drop prepends it.
             destination = 0 if point.y() < 0 else self.rowCount()
         else:
             rect = self.visualRect(self.model().index(row, 0))
             destination = row + int(point.y() > rect.center().y())
-        # Qt gives the insertion slot before removing the source row.
+        # Drop coordinates indicate an insertion slot, before the source row
+        # would be removed; Store.move_job expects its final zero-based index.
         if destination > source:
             destination -= 1
         destination = max(0, min(destination, self.rowCount() - 1))
         if destination != source:
             self.reorder_requested.emit(int(job_id), destination)
-        event.acceptProposedAction()
+        # Never accept a MoveAction: Qt would erase source cells after this
+        # handler, even though SQLite already saved and redrew the new order.
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
 
 
 def fmt_seconds(seconds):
@@ -196,7 +223,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.2')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.3')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -267,7 +294,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.2 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.3 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -669,6 +696,7 @@ class Studio(QMainWindow):
         l.addLayout(filters)
         self.job_table = QueueTableWidget()
         self.job_table.reorder_requested.connect(self.reorder_queue_job)
+        self.job_table.drag_finished.connect(self.refresh_jobs)
         self.job_table.setSortingEnabled(False)  # Sorting would hide execution order.
         self.job_table.setHorizontalHeaderLabels(['Job / part', 'Book', 'Sections', 'Narrator', 'Status', 'Progress', 'Created'])
         self.setup_table(self.job_table)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.10.3 — Fix vanishing rows after dragging queued parts
+
+- Prevent native Qt MoveAction from removing QTableWidgetItem cells after SQLite has already saved a queue reorder.
+- Use a copy-only drag signal and explicitly accept CopyAction on drop, with a defensive final view refresh after the drag loop exits.
+- Freeze the job ID at drag start so hover selection changes cannot reorder the wrong part; only pending jobs are draggable.
+- Add real-PySide6/SQLite UI regression coverage for non-destructive drop actions, actual reordered dispatch, complete row rendering and Move up behavior.
+- No changes to generation, cache, M4B output, or saved job metadata.
+
 ## 2.10.2 — Persistent drag-and-drop queue ordering
 
 - Display pending parts in their real execution order (top to bottom) instead of reversed job ID order.

@@ -245,6 +245,15 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.10.3: Drag-and-drop queue display fix
+
+V2.10.2's drag-and-drop could leave blank rows because Qt removed native
+table cells after the application saved the reordered queue. V2.10.3 disables
+the destructive native MoveAction and refreshes from SQLite when dragging
+finishes. A blank row does **not** mean its queued job was deleted. Restart the
+GUI after an active conversion finishes to load the fix. Do not interrupt
+generation just to repair the display.
+
 ### V2.10.2: Persistent conversion queue order
 
 The Queue page shows the execution order top to bottom. Drag a pending part below
