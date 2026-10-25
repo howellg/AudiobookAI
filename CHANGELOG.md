@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.10.2 — Persistent drag-and-drop queue ordering
+
+- Display pending parts in their real execution order (top to bottom) instead of reversed job ID order.
+- Drag queued rows or use **Move up**, **Move down** and **Move to end** to reschedule work without stopping an active narrator process.
+- Add SQLite queue-position migration, durable ordering across app restarts, and consistent next-job selection. Existing jobs and per-part caches are preserved.
+- Mirror queue position to MySQL with backwards-compatible schema migration; keep SQLite authoritative.
+- Disable manual reorder controls when search/status filters hide rows; prevent moving active and completed jobs.
+- Add tests for drag intent, storage migration, persistence, pending-job dispatch, active-job safety and MySQL argument counts.
+
+
 ## 2.8.8 — Cache cleanup path safety and MySQL snapshot validation
 
 - Enforce raw-cache deletion containment against the configured AudiobookAI cache path; no longer accept arbitrary directories merely because their names begin with `test_`.

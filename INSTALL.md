@@ -245,6 +245,17 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.10.2: Persistent conversion queue order
+
+The Queue page shows the execution order top to bottom. Drag a pending part below
+the rest of a book, or use **Move up**, **Move down**, and **Move to end**. The
+order is saved immediately to SQLite and mirrored to MySQL when connected.
+Clear search and status filters before rearranging. The currently active job
+cannot be moved or preempted; changes affect the next job selected after it
+finishes. To continue with remaining queued parts after a manually selected
+chapter, press **Start queue** while that chapter is running. Reordering does
+not modify audio caches, frozen pronunciation rules, or output filenames.
+
 ### V2.10.1: Offline-first model setup
 
 AudiobookAI's converter uses locally cached Chatterbox files by default and does not check the Hugging Face Hub when starting each queued part. You **must explicitly download the model before the first generation** on a fresh installation:

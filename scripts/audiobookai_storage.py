@@ -159,10 +159,15 @@ class Store:
             'voice_path': 'TEXT',
             'pronunciation_required': 'INTEGER NOT NULL DEFAULT 0',
             'acting_mode': "TEXT NOT NULL DEFAULT 'standard'",
+            'queue_position': 'INTEGER',
         }
         for field, column_sql in new_columns.items():
             if field not in cols:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {field} {column_sql}')
+        # Upgrade legacy FIFO order without changing job IDs, status or files.
+        # Job IDs are monotonic, so their original ascending order is preserved.
+        self.db.execute('UPDATE jobs SET queue_position=id WHERE queue_position IS NULL')
+        self.db.execute('CREATE INDEX IF NOT EXISTS idx_jobs_queue_position ON jobs(queue_position,id)')
         receipt_cols = {r['name'] for r in self.db.execute('PRAGMA table_info(completed_parts)')}
         if 'acting_mode' not in receipt_cols:
             self.db.execute("ALTER TABLE completed_parts ADD COLUMN acting_mode TEXT NOT NULL DEFAULT 'standard'")
@@ -278,12 +283,14 @@ class Store:
                             if digits.isascii() and digits.isdecimal():
                                 highest_snapshot = max(highest_snapshot, int(digits))
             new_id = max(highest_db, highest_recorded, highest_snapshot) + 1
+            next_position = self.db.execute(
+                'SELECT COALESCE(MAX(queue_position),0) + 1 FROM jobs').fetchone()[0]
             self.db.execute('''INSERT INTO jobs(
-                id,book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required,acting_mode)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                id,book_id,name,indices,output_name,status,added,updated,voice_path,pronunciation_required,acting_mode,queue_position)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (new_id, book_id, name, json.dumps(indices), output_name, 'queued', now(), now(),
                  str(voice_path) if voice_path else None,
-                 1 if pronunciation_required else 0, acting_mode))
+                 1 if pronunciation_required else 0, acting_mode, next_position))
             self.db.execute('''INSERT INTO job_id_sequence(name,last_id) VALUES('jobs',?)
                 ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id''', (new_id,))
             self.changed()
@@ -306,7 +313,7 @@ class Store:
         """Return queue rows joined to their book titles and source paths."""
         return self.db.execute('''SELECT jobs.*, books.title AS book_title, books.path AS book_path
                                   FROM jobs JOIN books ON jobs.book_id=books.id
-                                  ORDER BY jobs.id DESC''').fetchall()
+                                  ORDER BY jobs.queue_position, jobs.id''').fetchall()
 
     def job(self, job_id):
         """Look up one queue row together with its book details."""
@@ -314,8 +321,44 @@ class Store:
                                   FROM jobs JOIN books ON jobs.book_id=books.id WHERE jobs.id=?''', (job_id,)).fetchone()
 
     def next_job(self):
-        """Return the oldest queued job for FIFO processing."""
-        return self.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        """Return the next pending job in user-defined queue order."""
+        return self.db.execute(
+            "SELECT id FROM jobs WHERE status='queued' ORDER BY queue_position, id LIMIT 1"
+        ).fetchone()
+
+    def move_job(self, job_id, new_index):
+        """Atomically move a pending job to a display/execution index (zero-based).
+
+        Active, stopping, failed and completed jobs cannot be dragged. Their
+        records and progress remain unchanged; only queue_position is changed.
+        The dispatcher reads the updated order at the next part boundary.
+        """
+        if not isinstance(new_index, int) or isinstance(new_index, bool):
+            raise ValueError('Queue destination must be a row index.')
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            rows = self.db.execute(
+                'SELECT id,status FROM jobs ORDER BY queue_position,id').fetchall()
+            ids = [row['id'] for row in rows]
+            if job_id not in ids:
+                raise ValueError('Job no longer exists in the queue.')
+            source = ids.index(job_id)
+            if rows[source]['status'] != 'queued':
+                raise ValueError('Only pending queued jobs can be moved; active parts stay running.')
+            destination = max(0, min(new_index, len(ids) - 1))
+            if source == destination:
+                self.db.rollback()
+                return False
+            ids.pop(source)
+            ids.insert(destination, job_id)
+            self.db.executemany(
+                'UPDATE jobs SET queue_position=? WHERE id=?',
+                [(index, item_id) for index, item_id in enumerate(ids, start=1)])
+            self.changed()
+            return True
+        except Exception:
+            self.db.rollback()
+            raise
 
     def update_job(self, job_id, status, output_path=None, error=''):
         """Persist status, finished time, last error, and export location."""
@@ -612,6 +655,7 @@ class MySQLMirror:
                     updated DATETIME NULL,
                     voice_path LONGTEXT NULL,
                     acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard',
+                    queue_position BIGINT NOT NULL DEFAULT 0,
                     INDEX idx_jobs_status (status,id),
                     FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
@@ -646,6 +690,9 @@ class MySQLMirror:
                 cur.execute(f"SHOW COLUMNS FROM {table} LIKE 'acting_mode'")
                 if cur.fetchone() is None:
                     cur.execute(f"ALTER TABLE {table} ADD COLUMN acting_mode VARCHAR(20) NOT NULL DEFAULT 'standard'")
+            cur.execute("SHOW COLUMNS FROM jobs LIKE 'queue_position'")
+            if cur.fetchone() is None:
+                cur.execute('ALTER TABLE jobs ADD COLUMN queue_position BIGINT NOT NULL DEFAULT 0')
             self.connection.commit()
             cur.close()
             self.last_error = None
@@ -694,12 +741,13 @@ class MySQLMirror:
                 cur.executemany('''INSERT INTO jobs
                     (id,book_id,name,indices_json,output_name,status,added,finished,
                      output_path,error,total_chunks,completed_chunks,current_section,
-                     current_chunk,current_total,updated,voice_path,acting_mode)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     current_chunk,current_total,updated,voice_path,acting_mode,queue_position)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     [(j['id'],j['book_id'],j['name'],j['indices'],j['output_name'],j['status'],
                       j['added'],j['finished'],j['output_path'],j['error'],j['total_chunks'],
                       j['completed_chunks'],j['current_section'],j['current_chunk'],
-                      j['current_total'],j['updated'],j.get('voice_path'),j.get('acting_mode','standard')) for j in jobs])
+                      j['current_total'],j['updated'],j.get('voice_path'),j.get('acting_mode','standard'),
+                      j.get('queue_position',j['id'])) for j in jobs])
             if completed_parts:
                 cur.executemany('''INSERT INTO completed_parts
                     (id,book_id,source_job_id,part_number,indices_json,output_name,
