@@ -23,7 +23,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, QSettings
+from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, QSettings, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut, QPalette
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
@@ -68,6 +68,58 @@ CONVERTER_FILE = SCRIPTS / 'epub_to_audiobook_v7_studio.py'
 DB_FILE = ROOT / 'output' / 'audiobookai_studio.sqlite3'
 STORY_RE = re.compile(r'^\s*(?:chapter|chap\.?|book|part)\s+(?:\d+|[IVXLCDM]+)(?:\b|[.:—–-])', re.I)
 EVENT_PREFIX = 'AUDIOBOOKAI_EVENT '
+
+
+class QueueTableWidget(QTableWidget):
+    """Translate a row drag into a requested persistent queue reorder.
+
+    Do not let Qt internally move QTableWidgetItems: SQLite owns the ordering
+    and refresh_jobs() synchronizes the view after a successful transaction.
+    """
+
+    reorder_requested = Signal(int, int)  # job ID, zero-based destination row
+
+    def __init__(self, parent=None):
+        super().__init__(0, 7, parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event):
+        if event.source() is not self or not self.dragEnabled():
+            event.ignore()
+            return
+        source = self.currentRow()
+        if source < 0 or self.isRowHidden(source):
+            event.ignore()
+            return
+        source_item = self.item(source, 0)
+        if source_item is None:
+            event.ignore()
+            return
+        job_id = source_item.data(Qt.UserRole)
+        if job_id is None:
+            event.ignore()
+            return
+
+        point = event.position().toPoint()
+        row = self.rowAt(point.y())
+        if row < 0:
+            # Drag below the last row to append. Drag over the header/top
+            # of the empty viewport to prepend.
+            destination = 0 if point.y() < 0 else self.rowCount()
+        else:
+            rect = self.visualRect(self.model().index(row, 0))
+            destination = row + int(point.y() > rect.center().y())
+        # Qt gives the insertion slot before removing the source row.
+        if destination > source:
+            destination -= 1
+        destination = max(0, min(destination, self.rowCount() - 1))
+        if destination != source:
+            self.reorder_requested.emit(int(job_id), destination)
+        event.acceptProposedAction()
 
 
 def fmt_seconds(seconds):
@@ -144,7 +196,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.1')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.2')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -215,7 +267,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.1 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.2 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -567,7 +619,8 @@ class Studio(QMainWindow):
         """Build job controls, progress readouts, log viewer, and job table."""
         l = self.page_base('Conversion queue', 'Jobs and progress persist locally and sync to MySQL when connected. Interrupted jobs reuse V7 chunk caches.')
         bar = QHBoxLayout()
-        bar.addWidget(mk_button('▶ Start queue', self.start_queue))
+        bar.addWidget(mk_button('▶ Start queue', self.start_queue,
+            'Start queued parts, or resume automatic continuation after the current selected part'))
         bar.addWidget(mk_button('Run selected', self.run_selected_job,
             'Generate just the selected queued part, then pause the queue'))
         bar.addWidget(mk_button('Pause after part', self.pause_after_part,
@@ -577,6 +630,14 @@ class Studio(QMainWindow):
         bar.addWidget(mk_button('Recover interrupted', self.recover_interrupted,
             'Requeue interrupted parts only when their source files and snapshots still exist'))
         bar.addWidget(mk_button('Remove selected', self.remove_selected_job))
+        self.queue_up = mk_button('↑ Move up', lambda: self.move_selected_job(-1),
+            'Move a pending part one row earlier in the execution order')
+        self.queue_down = mk_button('↓ Move down', lambda: self.move_selected_job(1),
+            'Move a pending part one row later in the execution order')
+        self.queue_end = mk_button('Move to end', self.move_selected_to_end,
+            'Place a pending part after the rest of the queue')
+        for control in (self.queue_up, self.queue_down, self.queue_end):
+            bar.addWidget(control)
         bar.addStretch()
         l.addLayout(bar)
         additional = QHBoxLayout()
@@ -606,7 +667,9 @@ class Studio(QMainWindow):
         self.queue_count.setObjectName('muted')
         filters.addWidget(self.queue_count)
         l.addLayout(filters)
-        self.job_table = QTableWidget(0, 7)
+        self.job_table = QueueTableWidget()
+        self.job_table.reorder_requested.connect(self.reorder_queue_job)
+        self.job_table.setSortingEnabled(False)  # Sorting would hide execution order.
         self.job_table.setHorizontalHeaderLabels(['Job / part', 'Book', 'Sections', 'Narrator', 'Status', 'Progress', 'Created'])
         self.setup_table(self.job_table)
         self.job_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -616,6 +679,10 @@ class Studio(QMainWindow):
         self.job_table.setMaximumHeight(255)
         self.job_table.doubleClicked.connect(self.open_selected_output)
         l.addWidget(self.job_table)
+        queue_hint = QLabel('Execution order: top → bottom. Drag pending rows to reorder, or use Move up/down/end. Active parts cannot be moved.')
+        queue_hint.setObjectName('muted')
+        queue_hint.setWordWrap(True)
+        l.addWidget(queue_hint)
         self.active_title = QLabel('No active generation')
         self.active_title.setFont(QFont('', 11, QFont.Bold))
         l.addWidget(self.active_title)
@@ -2583,6 +2650,12 @@ class Studio(QMainWindow):
             self.job_table.setRowHidden(row, not visible)
             shown += visible
         self.queue_count.setText(f'{shown} / {self.job_table.rowCount()} jobs')
+        # Moving against a filtered/hidden set of rows is ambiguous: require
+        # the complete execution order to be visible for drag and buttons.
+        unfiltered = wanted == 'All jobs' and not term
+        self.job_table.setDragEnabled(unfiltered)
+        for control in (self.queue_up, self.queue_down, self.queue_end):
+            control.setEnabled(unfiltered)
 
     def copy_log(self):
         """Copy visible generation messages to the clipboard for debugging."""
@@ -2925,6 +2998,39 @@ class Studio(QMainWindow):
             table.setUpdatesEnabled(True)
             table.blockSignals(previous_signals)
         self.filter_queue()
+
+    def reorder_queue_job(self, job_id, destination):
+        """Reorder pending work without stopping or replacing the active job."""
+        if self.queue_filter.currentText() != 'All jobs' or self.queue_search.text().strip():
+            self.statusBar().showMessage('Clear queue filters before changing execution order.')
+            return
+        try:
+            changed = self.store.move_job(job_id, destination)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        if changed:
+            self.refresh_jobs()
+            self.statusBar().showMessage(
+                'Queue order saved. The next part will follow this order after the active job finishes.')
+
+    def move_selected_job(self, direction):
+        """Keyboard/button alternative to dragging a queued row."""
+        job_id = self.selected_job_id()
+        if job_id is None:
+            self.statusBar().showMessage('Select a queued part to move.')
+            return
+        ordered = [row['id'] for row in self.store.jobs()]
+        if job_id in ordered:
+            self.reorder_queue_job(job_id, ordered.index(job_id) + direction)
+
+    def move_selected_to_end(self):
+        """Send a pending chapter behind a currently queued full book."""
+        job_id = self.selected_job_id()
+        if job_id is not None:
+            self.reorder_queue_job(job_id, len(self.store.jobs()) - 1)
+        else:
+            self.statusBar().showMessage('Select a queued part to move.')
 
     def selected_job_id(self):
         """Look up the stable database identifier stored in the selected queue row."""
