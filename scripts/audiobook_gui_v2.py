@@ -52,6 +52,7 @@ from audiobookai_readalong import read_chapter, chunk_at, clamp_resume_ms
 from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
                                       chunk_source_log, BufferedGenerationLog)
 from audiobookai_headless import headless_runner_active
+from audiobookai_cache import cache_preflight
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
@@ -66,6 +67,7 @@ SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
 CONVERTER_FILE = SCRIPTS / 'epub_to_audiobook_v7_studio.py'
 DB_FILE = ROOT / 'output' / 'audiobookai_studio.sqlite3'
+CACHE_DIR = ROOT / 'output' / 'narration_cache_v2'
 STORY_RE = re.compile(r'^\s*(?:chapter|chap\.?|book|part)\s+(?:\d+|[IVXLCDM]+)(?:\b|[.:—–-])', re.I)
 EVENT_PREFIX = 'AUDIOBOOKAI_EVENT '
 
@@ -223,7 +225,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.3')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.4')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -246,6 +248,12 @@ class Studio(QMainWindow):
         self.active_job_id = None
         self.stop_requested = False
         self.run_queue = False
+        # Storage waits never change the SQLite job status. No QProcess exists
+        # while the required external cache volume is unavailable.
+        self.storage_waiting = False
+        self.storage_wait_queue = False
+        self.storage_wait_job_id = None
+        self.storage_last_warning = None
         self.buffer = ''
         self.plan = {}
         self.done_chunks = {}
@@ -294,7 +302,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.3 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.4 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -360,6 +368,11 @@ class Studio(QMainWindow):
             self.shortcuts.append(shortcut)
         # A single 500ms timer refreshes elapsed time and batch-renders logs.
         # It runs only during conversion; unchanged progress labels are skipped.
+        # Only poll while waiting on an unavailable SSD, and only when the
+        # user explicitly opted into automatic recovery.
+        self.storage_timer = QTimer(self)
+        self.storage_timer.setInterval(15000)
+        self.storage_timer.timeout.connect(self.check_storage_and_resume)
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
         self.elapsed_timer.timeout.connect(self.tick)
@@ -379,6 +392,8 @@ class Studio(QMainWindow):
         self.backup_timer.timeout.connect(self.maybe_auto_metadata_backup)
         self.backup_timer.start(30 * 60 * 1000)
         QTimer.singleShot(3500, self.maybe_auto_metadata_backup)
+        # Read-only startup indicator; never launch or resume jobs on opening.
+        QTimer.singleShot(1200, self.check_storage_and_resume)
 
     def page_base(self, heading, intro, scroll=False):
         """Create a page header and layout, optionally using a scrolling container."""
@@ -679,6 +694,25 @@ class Studio(QMainWindow):
             'Remove verified completed entries from queue; keep files and permanent history'))
         additional.addStretch()
         l.addLayout(additional)
+        storage_controls = QHBoxLayout()
+        storage_controls.addWidget(mk_button('Check storage & resume',
+            self.check_storage_and_resume,
+            'Check the cache SSD without writing files; resume only a queue paused by missing storage'))
+        self.storage_auto_resume = QCheckBox('Auto-resume when SSD returns')
+        self.storage_auto_resume.setToolTip(
+            'Opt-in: while the queue is paused for missing storage, check every 15 seconds '
+            'and restart only the waiting queued part when the SSD is mounted again. '
+            'Does not auto-start work after reopening Studio.')
+        self.storage_auto_resume.setChecked(
+            self.prefs.value('storage/auto_resume', False, type=bool))
+        self.storage_auto_resume.toggled.connect(self.toggle_storage_auto_resume)
+        storage_controls.addWidget(self.storage_auto_resume)
+        storage_controls.addStretch()
+        l.addLayout(storage_controls)
+        self.storage_status_label = QLabel('Cache storage: not checked')
+        self.storage_status_label.setObjectName('muted')
+        self.storage_status_label.setWordWrap(True)
+        l.addWidget(self.storage_status_label)
         filters = QHBoxLayout()
         filters.addWidget(QLabel('Show:'))
         self.queue_filter = QComboBox()
@@ -3157,11 +3191,78 @@ class Studio(QMainWindow):
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_dir.resolve())))
 
+    def toggle_storage_auto_resume(self, enabled):
+        """Persist the opt-in and adjust polling only while waiting."""
+        self.prefs.setValue('storage/auto_resume', enabled)
+        if enabled and self.storage_waiting and self.proc is None:
+            self.storage_timer.start()
+        else:
+            self.storage_timer.stop()
+
+    def clear_storage_wait(self):
+        """Cancel any pending SSD-based restart without changing queued work."""
+        self.storage_timer.stop()
+        self.storage_waiting = False
+        self.storage_wait_queue = False
+        self.storage_wait_job_id = None
+
+    def defer_for_storage(self, job_id, detail):
+        """Keep the job queued and pause safely if its cache drive is offline."""
+        self.storage_waiting = True
+        self.storage_wait_queue = bool(self.run_queue)
+        self.storage_wait_job_id = None if self.run_queue else job_id
+        self.run_queue = False
+        self.storage_status_label.setText('Storage unavailable — ' + detail)
+        self.storage_status_label.setToolTip(detail)
+        self.active_title.setText('Queue paused — cache SSD unavailable')
+        self.statusBar().showMessage('Queue paused: cache drive unavailable. Mount it and check storage.')
+        if detail != self.storage_last_warning:
+            self.write_log('Queue paused before launching Chatterbox: ' + detail)
+        self.storage_last_warning = detail
+        if self.storage_auto_resume.isChecked():
+            self.storage_timer.start()
+
+    def check_storage_and_resume(self):
+        """Read-only manual/timed check; resume exactly the deferred operation."""
+        report = cache_preflight(CACHE_DIR)
+        if not report.ready:
+            self.storage_status_label.setText('Storage unavailable — ' + report.detail)
+            self.storage_status_label.setToolTip(report.detail)
+            if not self.storage_waiting:
+                self.statusBar().showMessage('Cache unavailable. Mount the SSD before starting a job.')
+            return
+        self.storage_status_label.setText(report.detail)
+        self.storage_status_label.setToolTip(str(report.cache_path))
+        if not self.storage_waiting:
+            self.statusBar().showMessage('Cache storage ready. No paused storage-dependent job to resume.')
+            return
+        # User may have started different work, or explicitly paused the queue.
+        # Neither case is permission to start another converter.
+        if self.proc is not None:
+            return
+        queue_mode = self.storage_wait_queue
+        selected_job = self.storage_wait_job_id
+        self.clear_storage_wait()
+        self.storage_last_warning = None
+        self.write_log('Cache storage restored; resuming the waiting part.')
+        if queue_mode:
+            self.start_queue()  # follows latest SQLite execution order
+        elif selected_job is not None:
+            job = self.store.job(selected_job)
+            if job is not None and job['status'] == 'queued':
+                self.run_queue = False
+                self.start_job(selected_job)
+            else:
+                self.statusBar().showMessage('Previously waiting part is no longer queued.')
+        else:
+            self.statusBar().showMessage('Cache storage ready. Click Start queue to continue.')
+
     def start_queue(self):
         """Start the next pending job unless paused or already generating."""
         if self.proc is not None:
             self.run_queue = True
             return
+        self.clear_storage_wait()
         self.run_queue = True
         nxt = self.store.next_job()
         if nxt is not None:
@@ -3185,11 +3286,13 @@ class Studio(QMainWindow):
             QMessageBox.information(self, 'Job not queued',
                 'Use Retry selected first if this part is interrupted or failed.')
             return
+        self.clear_storage_wait()
         self.run_queue = False
         self.start_job(job_id)
 
     def pause_after_part(self):
         """Stop automatic queue advancement after the active M4B finishes."""
+        self.clear_storage_wait()
         self.run_queue = False
         if self.proc is not None:
             self.statusBar().showMessage('Will finish this M4B part, then pause before the next one.')
@@ -3219,8 +3322,18 @@ class Studio(QMainWindow):
             self.statusBar().showMessage('Close the audio editor before starting conversion to avoid simultaneous chapter changes.')
             return
         job = self.store.job(job_id)
-        if job is None:
+        if job is None or job['status'] != 'queued':
             return
+        # Strictly read-only check BEFORE logging, allocating QProcess, or
+        # marking SQLite running. Never regenerate into a missing symlink.
+        report = cache_preflight(CACHE_DIR)
+        if not report.ready:
+            self.defer_for_storage(job_id, report.detail)
+            return
+        self.clear_storage_wait()
+        self.storage_last_warning = None
+        self.storage_status_label.setText(report.detail)
+        self.storage_status_label.setToolTip(str(report.cache_path))
         epub = Path(job['book_path'])
         if not epub.is_file():
             self.store.update_job(job_id, 'failed', error='EPUB file missing')
@@ -3429,6 +3542,7 @@ class Studio(QMainWindow):
 
     def stop_job(self):
         """Request an orderly stop that retains previously completed chunk audio."""
+        self.clear_storage_wait()
         self.run_queue = False
         if self.proc is None:
             self.statusBar().showMessage('Queue paused. Start queue when you are ready.')
@@ -4108,10 +4222,13 @@ class Studio(QMainWindow):
             self.error('Unable to calculate cache size', exc)
 
     def open_cache_folder(self):
-        """Show the raw WAV cache folder in the file manager."""
-        folder = ROOT / 'output' / 'narration_cache_v2'
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        """Show available raw WAV cache without replacing missing SSD links."""
+        report = cache_preflight(CACHE_DIR)
+        if not report.ready:
+            QMessageBox.warning(self, 'Cache drive unavailable', report.detail)
+            return
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CACHE_DIR)))
 
     def closeEvent(self, event):
         """Remember window state and ask for a safe shutdown if generation is active."""
@@ -4146,6 +4263,7 @@ class Studio(QMainWindow):
                 'Stop the current conversion first, then close the application. All completed cached chunks will remain.')
             event.ignore()
         else:
+            self.clear_storage_wait()
             self.reader_save_progress()
             self.prefs.setValue('geometry', self.saveGeometry())
             self.prefs.setValue('batch_size', self.batch_size.value())

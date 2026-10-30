@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.3**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.4**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.10.4 SSD cache preflight and recovery:** The GUI and headless runner now check the narration-cache directory and any external SSD symlink **before** marking a job running or launching Chatterbox. A missing mount pauses generation with the queued job preserved, rather than producing a repeated converter traceback or silently replacing the cache. Queue shows storage readiness and approximate free capacity, with **Check storage & resume** to resume the exact waiting job or the normal queue order after remounting. Optional **Auto-resume when SSD returns** (off by default, remembered across sessions) checks every 15 seconds **only while the current session is waiting for cache storage**. Manual Pause/Stop cancels pending auto-resume; launching Studio again does not automatically launch pending jobs. The headless runner exits with an actionable storage error while preserving the job's existing status. Cache inspection is read-only and does not mount drives or alter audio.
 - **V2.10.3 drag-and-drop stability hotfix:** Corrects a Qt-specific regression where QTableWidget's native MoveAction deleted source table cells *after* the application had already saved the new queue order and refreshed the view, leaving blank rows and misleading execution order. Dragging now uses a copy-only signal and delegates the actual reorder entirely to SQLite; a final refresh after the drag loop restores the table from the authoritative database. **Move up/down/end**, current-part generation, output files, caching, and saved queue metadata are unchanged. Blank rows in V2.10.2 were a display bug; reopen the GUI after finishing the current conversion to load the fix.
 - **V2.10.2 persistent queue reordering:** The Queue page now displays the **actual execution order, top to bottom**, instead of newest-first. Drag any pending job to another row, or select it and use **Move up**, **Move down**, or **Move to end**. Reordering is saved immediately in SQLite, survives restarts, and is honored at the next part boundary even while another job is generating. Running/stopping and finished jobs cannot be moved; filters must be cleared while rearranging. The existing MySQL mirror receives the position as metadata. **Start queue** during an active single-part run to allow the following queued parts to run automatically once that part finishes.
 - **V2.10.1 offline-first Chatterbox models:** The converter and standalone V7 engine set `HF_HUB_OFFLINE=1` by default *before Hugging Face libraries load*, so completed model downloads run entirely from the local cache without startup network checks. Existing explicit environment overrides remain respected. **Settings → Chatterbox models** adds **Check local models** (never uses internet), **Download missing files** (explicit online download) and **Refresh all model files** (explicit online refresh of about 3 GB). These run in a separate subprocess without altering your queued jobs, generated speech cache, EPUBs, or chapter WAVs. The app displays a useful missing-cache error when the models have not been downloaded; new installs must download the model before their first offline generation. Model updates do not automatically invalidate existing narration or regenerate speech.
@@ -106,6 +107,29 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## External SSD narration cache (V2.10.4)
+
+If output/narration_cache_v2 is a symlink to a removable SSD, keep it intact.
+**Do not remove or recreate the symlink when the drive is unmounted.**
+Studio checks the link and mount before starting each part; an unavailable
+drive leaves the job **Queued** and stops further automatic dispatch. Mount
+the same SSD and click **Queue → Check storage & resume**. If you enable
+**Auto-resume when SSD returns** on the Queue page, Studio checks at
+15-second intervals and resumes that specific waiting operation after the
+drive is available. This is opt-in: it is **off by default**. Pausing/stopping
+the queue cancels a pending restart. Automatic recovery applies only to an
+in-session storage wait, not to an old interrupted/failed job or a relaunch
+of the app. To retry an earlier failed part, select it, click **Retry selected**,
+then **Start queue**.
+
+Queue's storage line reports whether the cache is accessible and available
+free space (for an existing directory). This is advisory, not a disk-space
+guarantee. Preflight is read-only and does not mount drives; sudden device
+loss while actively generating may still interrupt the converter. The engine
+continues to validate the cache when it actually begins work, and the
+headless runner performs the same preflight before changing the queued
+job's status.
 
 ## Queue display modes (V2.8.6)
 

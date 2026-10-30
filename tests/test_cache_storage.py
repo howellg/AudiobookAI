@@ -11,10 +11,82 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 
-from audiobookai_cache import ensure_cache_directory, cache_error_summary
+from audiobookai_cache import ensure_cache_directory, cache_error_summary, cache_preflight
 
 
 class CacheStorageTests(unittest.TestCase):
+    def test_preflight_unmounted_link_is_read_only_and_explains_mount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            link = root / 'narration_cache_v2'
+            target = root / 'unmounted' / 'narration_cache_v2'
+            link.symlink_to(target)
+            before = link.readlink()
+            result = cache_preflight(link)
+            self.assertFalse(result.ready)
+            self.assertIn('Mount the SSD', result.detail)
+            self.assertEqual(link.readlink(), before)
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(target.exists())
+
+    def test_preflight_detects_known_unmounted_media_even_if_directory_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'stray-files' / 'cache'
+            target.mkdir(parents=True)
+            (target / 'chunk.wav').write_bytes(b'keep')
+            link = root / 'cache'
+            link.symlink_to(target)
+            with patch('audiobookai_cache._removable_mount', return_value=target.parent), \
+                    patch('audiobookai_cache.os.path.ismount', return_value=False):
+                result = cache_preflight(link)
+            self.assertFalse(result.ready)
+            self.assertIn('not mounted', result.detail)
+            self.assertEqual((target / 'chunk.wav').read_bytes(), b'keep')
+
+    def test_preflight_good_link_reports_free_space_and_preserves_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'ssd' / 'cache'
+            target.mkdir(parents=True)
+            (target / 'chunk.wav').write_bytes(b'keep audio')
+            link = root / 'cache'
+            link.symlink_to(target)
+            result = cache_preflight(link)
+            self.assertTrue(result.ready, result.detail)
+            self.assertIsInstance(result.free_bytes, int)
+            self.assertEqual((target / 'chunk.wav').read_bytes(), b'keep audio')
+
+    def test_preflight_does_not_create_missing_internal_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'new-cache'
+            status = cache_preflight(path)
+            self.assertTrue(status.ready)
+            self.assertFalse(path.exists())
+            self.assertIn('will be created', status.detail)
+            existing_file = root / 'not_a_dir'
+            existing_file.write_bytes(b'keep')
+            self.assertFalse(cache_preflight(existing_file).ready)
+
+    def test_recognizes_standard_linux_auto_mount_roots(self):
+        from audiobookai_cache import _removable_mount
+        self.assertEqual(_removable_mount(
+            Path('/run/media/garret/MySSD/AudiobookAI/narration_cache_v2')),
+            Path('/run/media/garret/MySSD'))
+        self.assertEqual(_removable_mount(
+            Path('/media/garret/MySSD/AudiobookAI/narration_cache_v2')),
+            Path('/media/garret/MySSD'))
+        self.assertIsNone(_removable_mount(Path('/tmp/internal_cache')))
+
+    def test_preflight_denies_unwritable_existing_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            with patch('audiobookai_cache.os.access', return_value=False):
+                status = cache_preflight(path)
+            self.assertFalse(status.ready)
+            self.assertIn('not readable/writable', status.detail)
+
     def test_unmounted_cache_symlink_is_never_replaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
