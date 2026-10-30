@@ -245,6 +245,31 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.10.4: External SSD cache preflight and recovery
+
+AudiobookAI checks `output/narration_cache_v2` **before** launching the
+converter. If that directory is a symlink into an unmounted SSD, Studio
+shows **Storage unavailable** and pauses the queue without marking the pending
+part as failed or deleting any audio. Mount the original drive, verify the
+symlink still points at the same cache, then click **Queue → Check storage
+& resume**. The storage line also reports disk free space when mounted.
+The headless queue runner makes this check before marking a job running.
+
+You can enable **Auto-resume when SSD returns** on Queue to retry access
+every 15 seconds while paused for an unavailable cache. This option is
+**off by default** and does not start jobs merely because Studio opened.
+**Pause after part** and **Stop safely** cancel a pending SSD-based restart.
+Previously failed jobs still require **Retry selected**. The preflight
+does not try to mount or repair drives and will never replace a dangling
+cache symlink.
+
+On Arch Linux, check the mount with:
+
+```bash
+findmnt /run/media/garret/MySSD
+test -d /run/media/garret/MySSD/AudiobookAI/narration_cache_v2 && echo 'Cache ready'
+```
+
 ### V2.10.3: Drag-and-drop queue display fix
 
 V2.10.2's drag-and-drop could leave blank rows because Qt removed native

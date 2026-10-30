@@ -99,6 +99,24 @@ class HeadlessTests(unittest.TestCase):
         self.assertEqual(self.store.claimed_sections(self.book), {1})
         self.assertEqual(len(self.store.recorded_jobs_for_export(self.book)), 1)
 
+    def test_unmounted_cache_preflight_never_claims_job_or_launches(self):
+        job_id = self.add(required=False)
+        link = self.output / 'narration_cache_v2'
+        missing = self.root / 'unmounted_ssd' / 'narration_cache_v2'
+        link.symlink_to(missing)
+        launched = []
+        def forbid_launch(*args, **kwargs):
+            launched.append(args)
+            raise AssertionError('Converter launched with missing SSD')
+        with patch.object(runner, 'OUTPUT', self.output):
+            with self.assertRaisesRegex(RuntimeError, 'remains queued'):
+                runner.run_job(self.store, job_id, process_factory=forbid_launch)
+        self.assertEqual(launched, [])
+        self.assertEqual(self.store.job(job_id)['status'], 'queued')
+        self.assertIsNone(self.store.job(job_id)['output_path'])
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(missing.exists())
+
     def test_zero_exit_without_verified_m4b_fails_safely(self):
         job_id = self.add(required=False)
         with patch.object(runner, "OUTPUT", self.output):
