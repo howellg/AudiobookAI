@@ -245,6 +245,24 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.10.5: Clear all conversion queue entries
+
+Use **Queue → Clear entire queue…** to remove all pending, interrupted,
+failed, and completed entries in one action instead of removing each
+individual part. This is especially useful if you chose the wrong
+**Sections per part** value when adding a book. The confirmation dialog
+lists the number and status of affected parts and defaults to **No**.
+
+Finish or safely stop any running conversion first. Bulk clearing refuses
+to run while an active or stopping job exists, and the delete is performed
+as a single SQLite transaction. This operation deletes **only queue
+entries**, not the imported books, output M4Bs, chapter WAVs, cached TTS
+audio, frozen pronunciation rules, permanent verified-completion ledger,
+or the job-ID allocator. Unfinished sections can then be requeued with
+the correct part size; verified finished sections remain in the
+completed-parts history. Removed job definitions are not recoverable
+from the Queue page without requeueing.
+
 ### V2.10.4: External SSD cache preflight and recovery
 
 AudiobookAI checks `output/narration_cache_v2` **before** launching the

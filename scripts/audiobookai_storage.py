@@ -554,6 +554,35 @@ class Store:
         self.db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
         self.changed()
 
+    def clear_all_jobs(self):
+        """Atomically empty the transient queue, including unfinished parts.
+
+        Deliberately preserve books, section metadata, completed_parts receipts,
+        never-reused job IDs, pronunciation snapshots and all audio on disk.
+        Refuse deletion while ANY job is running or stopping, even if the GUI
+        missed a competing/headless process. SQLite remains authoritative.
+        """
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            active = self.db.execute(
+                "SELECT 1 FROM jobs WHERE status IN ('running','stopping') LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                raise ValueError(
+                    'A conversion is still running or stopping. '
+                    'Finish or stop it safely before clearing the entire queue.'
+                )
+            cursor = self.db.execute('DELETE FROM jobs')
+            count = cursor.rowcount
+            if count:
+                self.changed()
+            else:
+                self.db.rollback()
+            return count
+        except Exception:
+            self.db.rollback()
+            raise
+
     def prune_recorded_jobs(self):
         """Clear only completed queue rows already backed by permanent receipts.
 

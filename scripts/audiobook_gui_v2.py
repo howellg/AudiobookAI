@@ -225,7 +225,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.4')
+        self.setWindowTitle('AudiobookAI Studio — V2.10.5')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
@@ -302,7 +302,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.4 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.10.5 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -692,6 +692,8 @@ class Studio(QMainWindow):
         additional.addWidget(mk_button('View job log', self.open_selected_diagnostic))
         additional.addWidget(mk_button('Clear finished jobs', self.clear_finished_jobs,
             'Remove verified completed entries from queue; keep files and permanent history'))
+        additional.addWidget(mk_button('Clear entire queue…', self.clear_entire_queue,
+            'Remove ALL queue entries, including unfinished parts; preserves books, audio and completed history'))
         additional.addStretch()
         l.addLayout(additional)
         storage_controls = QHBoxLayout()
@@ -3708,6 +3710,56 @@ class Studio(QMainWindow):
         self.refresh_saved_parts()
         self.statusBar().showMessage(
             f'Cleared {count} completed queue job(s); permanent history and audio retained.')
+
+    def clear_entire_queue(self):
+        """Remove all transient queue jobs after explicit confirmation.
+
+        Never terminate, remove, or mark an active job as complete. Completed
+        export receipts and audio/cache files are independent of queue rows.
+        """
+        if self.proc is not None or headless_runner_active():
+            QMessageBox.information(self, 'Conversion in progress',
+                'Finish the current part or use Stop safely first. '
+                'You can clear the entire queue once generation has stopped.')
+            return
+        rows = self.store.jobs()
+        if not rows:
+            QMessageBox.information(self, 'Queue already empty',
+                'There are no queued, interrupted, failed, or completed queue entries to remove.')
+            return
+        if any(job['status'] in ('running', 'stopping') for job in rows):
+            QMessageBox.warning(self, 'Conversion still active',
+                'One or more jobs are still marked running or stopping. '
+                'Finish or stop the conversion safely before clearing the queue.')
+            return
+        counts = {status: sum(job['status'] == status for job in rows)
+                  for status in ('queued', 'interrupted', 'failed', 'complete')}
+        summary = ', '.join(
+            f'{count} {status}' for status, count in counts.items() if count)
+        answer = QMessageBox.question(
+            self, 'Clear entire conversion queue?',
+            f'Remove ALL {len(rows)} queue entries ({summary})?\n\n'
+            'This includes unfinished parts across all books. '
+            'You will need to add any unfinished sections to the queue again.\n\n'
+            'This DOES NOT delete imported books, exported M4Bs, chapter WAVs, '
+            'narration caches, pronunciation snapshots, or permanent completed-part history.\n\n'
+            'This queue removal cannot be undone.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            count = self.store.clear_all_jobs()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Queue not cleared', str(exc))
+            return
+        # Stop any deferred SSD-based recovery from restarting a removed job.
+        self.clear_storage_wait()
+        self.run_queue = False
+        self.refresh_jobs()
+        self.refresh_saved_parts()
+        self.refresh_review()
+        self.statusBar().showMessage(
+            f'Cleared {count} queue entries. Saved audio and completed-part history remain intact.')
 
     def selected_job_output(self):
         """Locate the M4B path associated with the selected job."""
