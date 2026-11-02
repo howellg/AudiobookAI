@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.4**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.5**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.10.5 clear entire queue:** **Queue → Clear entire queue…** removes all queue entries (queued, interrupted, failed, and completed) at once, even if a filter is active. A confirmation shows the number and statuses of affected parts, defaults to **No**, and cannot proceed while a converter is running or stopping. Only transient queue records are removed: imported EPUBs, saved M4Bs/WAVs, raw narration cache, frozen pronunciation snapshots, immutable completed-part receipts, and never-reused job IDs all remain. This is useful when choosing the wrong **Sections per part** count: after clearing, return to **Generate**, choose the correct size, and add the chapters again. Previously unfinished chapters will need requeueing; verified finished chapters remain recorded in the permanent history.
 - **V2.10.4 SSD cache preflight and recovery:** The GUI and headless runner now check the narration-cache directory and any external SSD symlink **before** marking a job running or launching Chatterbox. A missing mount pauses generation with the queued job preserved, rather than producing a repeated converter traceback or silently replacing the cache. Queue shows storage readiness and approximate free capacity, with **Check storage & resume** to resume the exact waiting job or the normal queue order after remounting. Optional **Auto-resume when SSD returns** (off by default, remembered across sessions) checks every 15 seconds **only while the current session is waiting for cache storage**. Manual Pause/Stop cancels pending auto-resume; launching Studio again does not automatically launch pending jobs. The headless runner exits with an actionable storage error while preserving the job's existing status. Cache inspection is read-only and does not mount drives or alter audio.
 - **V2.10.3 drag-and-drop stability hotfix:** Corrects a Qt-specific regression where QTableWidget's native MoveAction deleted source table cells *after* the application had already saved the new queue order and refreshed the view, leaving blank rows and misleading execution order. Dragging now uses a copy-only signal and delegates the actual reorder entirely to SQLite; a final refresh after the drag loop restores the table from the authoritative database. **Move up/down/end**, current-part generation, output files, caching, and saved queue metadata are unchanged. Blank rows in V2.10.2 were a display bug; reopen the GUI after finishing the current conversion to load the fix.
 - **V2.10.2 persistent queue reordering:** The Queue page now displays the **actual execution order, top to bottom**, instead of newest-first. Drag any pending job to another row, or select it and use **Move up**, **Move down**, or **Move to end**. Reordering is saved immediately in SQLite, survives restarts, and is honored at the next part boundary even while another job is generating. Running/stopping and finished jobs cannot be moved; filters must be cleared while rearranging. The existing MySQL mirror receives the position as metadata. **Start queue** during an active single-part run to allow the following queued parts to run automatically once that part finishes.
@@ -107,6 +108,26 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Clearing the entire queue (V2.10.5)
+
+The **Clear finished jobs** button keeps unfinished parts and removes only
+verified finished queue rows. The separate **Clear entire queue…** button
+removes **every** queue row, including queued, interrupted, failed, and
+completed jobs, regardless of filters. It first displays a summary and asks
+for confirmation; **No** is selected by default.
+
+Finish the running conversion or select **Stop safely** before clearing.
+No running or stopping job can be removed by bulk clear. Clearing does not
+delete any audiobooks, cached WAVs, source EPUBs, pronunciation snapshots,
+or the durable completed-part ledger. Previously unfinished chapters are no
+longer reserved in the queue, making it easy to choose a new
+**Sections per part** value on Generate and requeue correctly.
+
+This operation removes your stored unfinished-job checkpoints and queued
+job definitions, although the previously generated audio remains on disk;
+you will need to add those chapters to the queue again. Permanent completed
+part receipts and monotonically increasing job IDs survive.
 
 ## External SSD narration cache (V2.10.4)
 

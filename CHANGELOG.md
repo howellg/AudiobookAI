@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.10.5 — Clear entire conversion queue
+
+- Add **Clear entire queue…** alongside **Clear finished jobs** on Queue. Remove queued, interrupted, failed, and completed transient records in one confirmation-guided operation, independent of queue filtering.
+- Show the total affected jobs and per-status counts in the confirmation, defaulting to cancel.
+- Use one atomic SQLite transaction, refuse if any job is running or stopping, and block while Qt/headless generation is active.
+- Keep imported EPUBs, generated M4B/WAV files, raw cache, frozen pronunciation snapshots, verified completion receipts, and the never-reused job sequence intact.
+- Cancel any deferred SSD-based auto-resume after clearing; refresh Queue, Review and completed-part history.
+- Add offline GUI/storage regression tests for cancellation, complete deletion, running-job guards, durable receipts, surviving audio, requeueability and persistent high-water job IDs.
+
+
 ## 2.10.3 — Fix vanishing rows after dragging queued parts
 
 - Prevent native Qt MoveAction from removing QTableWidgetItem cells after SQLite has already saved a queue reorder.
