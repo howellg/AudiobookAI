@@ -16,6 +16,12 @@ queryable mirror, so MySQL outages do not interrupt narration or the queue.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
+import os
+import secrets
+import urllib.parse
+import zipfile
 import json
 import re
 import sys
@@ -53,6 +59,7 @@ from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
                                       chunk_source_log, BufferedGenerationLog)
 from audiobookai_headless import headless_runner_active
 from audiobookai_cache import cache_preflight
+from audiobookai_mobile import MobileBridge, MobileHTTPServer, DEFAULT_PORT
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
@@ -225,9 +232,15 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.10.5')
+        self.setWindowTitle('AudiobookAI Studio — V2.11.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
+        self.mobile_bridge = MobileBridge()
+        self.mobile_http = None
+        self.mobile_token = str(self.prefs.value('mobile/access_key', '') or '')
+        if len(self.mobile_token) < 24:
+            self.mobile_token = secrets.token_urlsafe(32)
+            self.prefs.setValue('mobile/access_key', self.mobile_token)
         # SQLite owns queue state; MySQL is only a separately synchronized copy.
         self.store = Store(DB_FILE)
         self.store.on_change = self.mark_mysql_dirty
@@ -302,7 +315,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.10.5 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.11.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -381,6 +394,15 @@ class Studio(QMainWindow):
         self.full_export_ui_timer = QTimer(self)
         self.full_export_ui_timer.setInterval(1000)
         self.full_export_ui_timer.timeout.connect(self.update_full_export_progress_display)
+        # All mobile commands are executed on Qt's GUI thread; the HTTP
+        # threads only enqueue requests. No extra SQLite writer or TTS process.
+        self.mobile_timer = QTimer(self)
+        self.mobile_timer.setInterval(120)
+        self.mobile_timer.timeout.connect(
+            lambda: self.mobile_bridge.process(self.handle_mobile_request))
+        # Don't add another always-on Qt event timer to 90-hour narration
+        # sessions unless the mobile dashboard was explicitly enabled.
+        QTimer.singleShot(1400, self.start_saved_mobile_dashboard)
         self.mirror_timer = QTimer(self)
         self.mirror_timer.setSingleShot(True)
         self.mirror_timer.timeout.connect(self.maybe_sync_mysql)
@@ -2243,6 +2265,40 @@ class Studio(QMainWindow):
         grid.setColumnStretch(1, 1)
         l.addLayout(grid)
 
+        l.addWidget(title_label('Mobile dashboard · private remote control', 14))
+        mobile_info = QLabel(
+            'Run the dashboard on 127.0.0.1 only, then share it privately to your '
+            'phone using Tailscale Serve. Requires Studio to stay open and the laptop '
+            'to stay awake. Never use Tailscale Funnel or router port forwarding.')
+        mobile_info.setObjectName('muted')
+        mobile_info.setWordWrap(True)
+        l.addWidget(mobile_info)
+        self.mobile_enabled = QCheckBox('Enable local mobile dashboard (port 8765)')
+        self.mobile_enabled.setChecked(
+            self.prefs.value('mobile/enabled', False, type=bool))
+        self.mobile_enabled.toggled.connect(self.toggle_mobile_dashboard)
+        l.addWidget(self.mobile_enabled)
+        self.mobile_status = QLabel('Mobile dashboard disabled')
+        self.mobile_status.setWordWrap(True)
+        self.mobile_status.setObjectName('muted')
+        l.addWidget(self.mobile_status)
+        mobile_row = QHBoxLayout()
+        mobile_row.addWidget(mk_button('Copy access key', self.copy_mobile_access_key))
+        mobile_row.addWidget(mk_button('Regenerate access key', self.rotate_mobile_access_key,
+            'Revokes access for phones using the old key; reconnect with the new one.'))
+        mobile_row.addWidget(mk_button('Copy Tailscale command', self.copy_tailscale_command))
+        mobile_row.addStretch()
+        l.addLayout(mobile_row)
+        mobile_tip = QLabel(
+            'On the laptop run: tailscale serve --bg 8765 '
+            '(private HTTPS). Check tailscale serve status for the https:// URL. '
+            'Your Android phone must also be signed in to Tailscale. '
+            'Paste the copied access key when the dashboard asks for it.')
+        mobile_tip.setObjectName('muted')
+        mobile_tip.setWordWrap(True)
+        mobile_tip.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(mobile_tip)
+
         l.addWidget(title_label('Chatterbox models · offline-first', 14))
         self.model_status = QLabel(
             'Narration uses locally cached Chatterbox models by default; no '
@@ -3193,6 +3249,331 @@ class Studio(QMainWindow):
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_dir.resolve())))
 
+    def start_saved_mobile_dashboard(self):
+        """Restore explicit opt-in after the GUI has fully initialized."""
+        if self.mobile_enabled.isChecked():
+            self.toggle_mobile_dashboard(True)
+
+    def toggle_mobile_dashboard(self, enabled):
+        """Start or stop a loopback HTTP listener, never a public network bind."""
+        if not enabled:
+            self.mobile_timer.stop()
+            if self.mobile_http is not None:
+                self.mobile_http.stop()
+                self.mobile_http = None
+            self.prefs.setValue('mobile/enabled', False)
+            self.mobile_status.setText('Mobile dashboard disabled.')
+            return
+        if self.mobile_http is not None:
+            return
+        try:
+            server = MobileHTTPServer(
+                self.mobile_bridge, self.mobile_token, DEFAULT_PORT)
+            server.start()
+            self.mobile_http = server
+            self.mobile_timer.start()
+            self.prefs.setValue('mobile/enabled', True)
+            self.mobile_status.setText(
+                'Mobile dashboard listening on http://127.0.0.1:8765 '
+                '(loopback only). Use private Tailscale Serve for HTTPS access.')
+        except OSError as exc:
+            self.prefs.setValue('mobile/enabled', False)
+            self.mobile_enabled.blockSignals(True)
+            self.mobile_enabled.setChecked(False)
+            self.mobile_enabled.blockSignals(False)
+            self.mobile_status.setText(f'Cannot start mobile dashboard: {exc}')
+
+    def copy_mobile_access_key(self):
+        QApplication.clipboard().setText(self.mobile_token)
+        self.statusBar().showMessage('Access key copied. Paste it on your own phone only.')
+
+    def copy_tailscale_command(self):
+        QApplication.clipboard().setText('tailscale serve --bg 8765')
+        self.statusBar().showMessage(
+            'Tailscale Serve command copied (private tailnet HTTPS; do not use Funnel).')
+
+    def rotate_mobile_access_key(self):
+        answer = QMessageBox.question(
+            self, 'Regenerate mobile access key?',
+            'Regenerate the secret access key? Previously authorized phones will '
+            'be disconnected and must sign in with the new key.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        was_running = self.mobile_http is not None
+        if was_running:
+            self.toggle_mobile_dashboard(False)
+        self.mobile_token = secrets.token_urlsafe(32)
+        self.prefs.setValue('mobile/access_key', self.mobile_token)
+        if was_running:
+            self.toggle_mobile_dashboard(True)
+        self.statusBar().showMessage('Access key changed. Old mobile sessions are revoked.')
+
+    def mobile_stop_safely(self):
+        """Remote stop without blocking Qt on a desktop-only confirmation."""
+        self.clear_storage_wait()
+        self.run_queue = False
+        if self.proc is None:
+            return {'message': 'Queue paused; no part currently running.'}
+        if self.stop_requested:
+            return {'message': 'Graceful stop is already in progress.'}
+        self.stop_requested = True
+        self.store.update_job(self.active_job_id, 'stopping')
+        self.refresh_jobs()
+        self.write_log('Remote graceful stop requested. Already cached chunks are retained.')
+        self.statusBar().showMessage('Stopping active conversion safely…')
+        self.proc.terminate()
+        # Deliberately do not offer the desktop force-kill dialog; nobody
+        # may be present at the laptop. The app stays in stopping if needed.
+        return {'message': 'Requested graceful stop. Previously cached chunks are safe.'}
+
+    def mobile_status_snapshot(self):
+        """Prepare dashboard data on the Qt thread using live queue metadata."""
+        rows = self.store.jobs()
+        active = self.store.job(self.active_job_id) if self.active_job_id else None
+        total = active['total_chunks'] if active else 0
+        done = active['completed_chunks'] if active else 0
+        if active:
+            # GUI's up-to-date estimates may lead persisted progress slightly.
+            total = max(int(self.total_chunks or 0), int(total or 0))
+            done = max(sum(self.done_chunks.values()), int(done or 0))
+        cache_state = cache_preflight(CACHE_DIR)
+        voices = [{'id': 'default', 'name': 'Default British narrator'}]
+        voices.extend({'id': str(path.relative_to(VOICE_DIR.resolve())),
+                       'name': path.stem} for path in voice_choices())
+        return {
+            'version': '2.11.0', 'run_queue': bool(self.run_queue),
+            'waiting_storage': bool(self.storage_waiting),
+            'active': ({
+                'id': active['id'], 'name': active['name'],
+                'book': active['book_title'], 'status': active['status'],
+                'section': self.current_section, 'total': total, 'done': done
+            } if active else None),
+            'eta': self.stat_eta.text(),
+            'storage': cache_state.detail,
+            'log': list(self.diagnostic_lines)[-15:],
+            'jobs': [{
+                'id': row['id'], 'book': row['book_title'], 'name': row['name'],
+                'book_id': row['book_id'], 'status': row['status'],
+                'progress': (
+                    f"{row['completed_chunks']}/{row['total_chunks']} chunks"
+                    if row['total_chunks'] else 'Not started')
+            } for row in rows],
+            'books': [{'id': book['id'], 'title': book['title'],
+                       'author': book['author'], 'sections': book['sections']}
+                      for book in self.store.books()],
+            'voices': voices,
+        }
+
+    def mobile_book_snapshot(self, payload):
+        book_id = int(payload.get('book_id', 0))
+        book = self.store.book(book_id)
+        if book is None:
+            raise ValueError('Book not found')
+        claimed = self.store.claimed_sections(book_id)
+        return {'book': {'id': book_id, 'title': book['title']},
+                'sections': [
+                    {'index': r['section_index'], 'title': r['title'],
+                     'words': r['words'], 'claimed': r['section_index'] in claimed}
+                    for r in self.store.db.execute(
+                        'SELECT section_index,title,words FROM book_sections '
+                        'WHERE book_id=? ORDER BY section_index', (book_id,))]}
+
+    def mobile_add_jobs(self, payload):
+        """Queue selected sections, preserving immutable voice/dictionary rules."""
+        book_id = int(payload.get('book_id', 0))
+        book = self.store.book(book_id)
+        if book is None or not Path(book['path']).is_file():
+            raise ValueError('Book EPUB is missing. Import or restore it first.')
+        size = payload.get('batch_size')
+        if type(size) is not int or not 1 <= size <= 100:
+            raise ValueError('Sections per part must be a whole number from 1 to 100.')
+        mode = payload.get('acting_mode', 'expressive')
+        if mode not in ('standard', 'expressive'):
+            raise ValueError('Invalid narration mode.')
+        voice_id = payload.get('voice', 'default')
+        if voice_id == 'default':
+            voice = None
+        else:
+            allowed = {str(p.relative_to(VOICE_DIR.resolve())): p
+                       for p in voice_choices()}
+            if voice_id not in allowed:
+                raise ValueError('Narrator is not in your approved narrator library.')
+            voice = allowed[voice_id]
+        sections = list(self.store.db.execute(
+            'SELECT section_index,title FROM book_sections WHERE book_id=? '
+            'ORDER BY section_index', (book_id,)))
+        if not sections:
+            raise ValueError('Book sections are missing; open it in Generate first.')
+        available = [row['section_index'] for row in sections]
+        already = self.store.claimed_sections(book_id)
+        if payload.get('all_unqueued') is True:
+            story = [row['section_index'] for row in sections
+                     if STORY_RE.match(row['title'])]
+            selected = [i for i in (story or available) if i not in already]
+        else:
+            expression = str(payload.get('ranges', '')).strip()
+            if len(expression) > 500:
+                raise ValueError('Section range is too long.')
+            selected = parse_section_ranges(expression, available)
+        if not selected:
+            raise ValueError('No unqueued sections selected.')
+        duplicate = set(selected) & already
+        if duplicate:
+            raise ValueError('Some sections already have jobs or permanent recordings: '
+                             + ', '.join(str(i) for i in sorted(duplicate)[:12])
+                             + '. Use unqueued chapters or select a different range.')
+        parts = [selected[i:i + size] for i in range(0, len(selected), size)]
+        if len(parts) > 75:
+            raise ValueError('Too many parts in one request. Choose a shorter section range.')
+        self.converter = self.converter or load_converter()
+        fixed_voice = freeze_voice(voice)
+        voice_identity = str(fixed_voice) if fixed_voice else None
+        folder = self.converter.book_folder(Path(book['path']), fixed_voice, mode)
+        existing = self.store.jobs()
+        occupied = {row['output_name'] for row in existing if row['book_id'] == book_id}
+        number = self.store.next_part_number(book_id, voice_identity, folder)
+        created = []
+        try:
+            for i, indices in enumerate(parts, start=number):
+                output_name = part_export_basename(
+                    book['title'], i, indices, occupied, folder)
+                occupied.add(output_name)
+                span = (f'{indices[0]}-{indices[-1]}' if len(indices) > 1
+                        else str(indices[0]))
+                job_id = self.store.add_job(book_id,
+                    f'Part {i} · sections {span}', indices, output_name,
+                    fixed_voice, pronunciation_required=True, acting_mode=mode)
+                created.append(job_id)
+                snapshot_for_job(job_id, book['path'])
+        except Exception:
+            for job_id in created:
+                self.store.remove_job(job_id)
+            raise
+        self.refresh_jobs()
+        return {'message': f'Added {len(created)} part(s) covering {len(selected)} sections.',
+                'job_ids': created}
+
+    def mobile_upload_epub(self, payload):
+        """Import bytes from a phone into a unique filename, never overwrite."""
+        data = payload.get('content')
+        raw_name = urllib.parse.unquote(str(payload.get('filename', '')))
+        if (not isinstance(data, bytes) or not 0 < len(data) <= 24 * 1024 * 1024
+                or len(raw_name) > 190 or not raw_name.lower().endswith('.epub')
+                or '/' in raw_name or chr(92) in raw_name or chr(0) in raw_name):
+            raise ValueError('Choose a valid EPUB filename and upload (maximum 24 MiB).')
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > 8000 or sum(i.file_size for i in entries) > 180 * 1024 * 1024:
+                raise ValueError('EPUB archive expands beyond safe size limits.')
+            if 'META-INF/container.xml' not in archive.namelist():
+                raise ValueError('This file is not a standard EPUB archive.')
+        safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', Path(raw_name).stem)[:70] or 'uploaded_book'
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        folder = ROOT / 'books'
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / f'{safe}_{digest}.epub'
+        if dest.is_symlink():
+            raise ValueError('Upload destination must not be a symbolic link.')
+        newly_created = not dest.exists()
+        if not newly_created:
+            if dest.read_bytes() != data:
+                raise ValueError('Upload filename collision. Rename the EPUB and try again.')
+        else:
+            temporary = folder / f'.{safe}_{secrets.token_hex(8)}.partial'
+            try:
+                temporary.write_bytes(data)
+                os.replace(temporary, dest)
+            finally:
+                temporary.unlink(missing_ok=True)
+        try:
+            conv = self.converter or load_converter()
+            self.converter = conv
+            title, author, sections = conv.load_epub(dest)
+            if not sections:
+                raise ValueError('EPUB contains no importable sections.')
+            book_id = self.store.import_book(dest, title, author, sections)
+            self.book_cache[book_id] = (title, author, sections)
+            self.refresh_books(select_id=book_id)
+        except Exception:
+            # Do not leave a bad EPUB in the library folder when importing
+            # fails. Never remove one that was present before this request.
+            if newly_created:
+                dest.unlink(missing_ok=True)
+            raise
+        return {'message': f'Imported {title} ({len(sections)} sections).',
+                'book_id': book_id}
+
+    def handle_mobile_request(self, action, payload):
+        """Execute allowlisted commands only on Qt GUI thread."""
+        if action == 'status':
+            return self.mobile_status_snapshot()
+        if action == 'book':
+            return self.mobile_book_snapshot(payload)
+        if action == 'upload':
+            return self.mobile_upload_epub(payload)
+        if action == 'add':
+            return self.mobile_add_jobs(payload)
+        if action == 'start':
+            self.start_queue()
+            return {'message': 'Start queue requested.'}
+        if action == 'pause':
+            self.pause_after_part()
+            return {'message': 'Automatic continuation disabled. Current part will finish.'}
+        if action == 'stop_safely':
+            return self.mobile_stop_safely()
+        if action == 'storage_check':
+            self.check_storage_and_resume()
+            return {'message': 'SSD storage checked.'}
+        if action == 'move':
+            job_id = int(payload['job_id'])
+            index = payload['index']
+            if type(index) is not int:
+                raise ValueError('Invalid destination.')
+            changed = self.store.move_job(job_id, index)
+            if changed:
+                self.refresh_jobs()
+            return {'message': 'Queue order saved.' if changed else 'Already in that position.'}
+        if action == 'retry':
+            job_id = int(payload['job_id'])
+            job = self.store.job(job_id)
+            if job is None or job['status'] not in ('interrupted', 'failed'):
+                raise ValueError('Only interrupted/failed jobs can be retried remotely.')
+            self.store.update_job(job_id, 'queued')
+            self.refresh_jobs()
+            return {'message': 'Part requeued.'}
+        if action == 'run_selected':
+            job_id = int(payload['job_id'])
+            job = self.store.job(job_id)
+            if job is None or job['status'] != 'queued' or self.proc is not None:
+                raise ValueError('Selected part must be queued and generator idle.')
+            self.run_queue = False
+            self.start_job(job_id)
+            return {'message': 'Selected part started; queue will pause afterward.'}
+        if action == 'clear_completed':
+            if payload.get('confirmation') is not True:
+                raise ValueError('Confirmation is required.')
+            if self.proc is not None or headless_runner_active():
+                raise ValueError('Cannot clear completed queue entries during an active conversion.')
+            count = self.store.prune_recorded_jobs()
+            self.refresh_jobs()
+            self.refresh_saved_parts()
+            self.refresh_review()
+            return {'message': f'Removed {count} verified completed queue entries.'}
+        if action == 'clear_all':
+            if payload.get('confirmation') != 'CLEAR QUEUE':
+                raise ValueError('Type CLEAR QUEUE to confirm.')
+            if self.proc is not None or headless_runner_active():
+                raise ValueError('Stop generation safely before clearing all queue entries.')
+            count = self.store.clear_all_jobs()
+            self.clear_storage_wait()
+            self.run_queue = False
+            self.refresh_jobs()
+            self.refresh_saved_parts()
+            self.refresh_review()
+            return {'message': f'Cleared {count} queue entries; audio and receipts preserved.'}
+        raise ValueError('Unknown or disallowed mobile action.')
+
     def toggle_storage_auto_resume(self, enabled):
         """Persist the opt-in and adjust polling only while waiting."""
         self.prefs.setValue('storage/auto_resume', enabled)
@@ -3258,6 +3639,11 @@ class Studio(QMainWindow):
                 self.statusBar().showMessage('Previously waiting part is no longer queued.')
         else:
             self.statusBar().showMessage('Cache storage ready. Click Start queue to continue.')
+
+    def continue_queue_if_requested(self):
+        """Respect a late remote/desktop Pause after part, even in the 350ms gap."""
+        if self.run_queue and self.proc is None:
+            self.start_queue()
 
     def start_queue(self):
         """Start the next pending job unless paused or already generating."""
@@ -3654,7 +4040,7 @@ class Studio(QMainWindow):
         self.refresh_review()
         if self.run_queue and good:
             # Schedule the next job after this signal handler unwinds.
-            QTimer.singleShot(350, self.start_queue)
+            QTimer.singleShot(350, self.continue_queue_if_requested)
         else:
             self.run_queue = False
 
@@ -4321,6 +4707,10 @@ class Studio(QMainWindow):
             self.prefs.setValue('batch_size', self.batch_size.value())
             self.prefs.setValue('split_parts', self.split_parts.isChecked())
             self.prefs.setValue('autorun', self.autorun.isChecked())
+            if self.mobile_http is not None:
+                self.mobile_http.stop()
+                self.mobile_http = None
+            self.mobile_timer.stop()
             if self.mysql_mirror:
                 self.mysql_mirror.disconnect()
             self.store.close()

@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.10.5**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.11.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.11.0 private phone dashboard:** A responsive, authenticated web dashboard (no new Python dependencies) displays live progress, job queue, ETA, logs, library and SSD status. Add and reorder jobs, select section ranges/part sizes/narrator/expressive mode, upload a new EPUB (24 MiB limit), start, safely pause after part, gracefully stop, retry, or clear queue entries. Studio remains the **single controller**: HTTP requests run through the Qt main thread so there is no competing converter or independent SQLite writer. The service binds to **127.0.0.1:8765**, is **off by default**, and requires a randomly generated access key. Reach it privately over HTTPS with **Tailscale Serve**, never Funnel. Studio must remain open and the laptop awake. See setup below.
 - **V2.10.5 clear entire queue:** **Queue → Clear entire queue…** removes all queue entries (queued, interrupted, failed, and completed) at once, even if a filter is active. A confirmation shows the number and statuses of affected parts, defaults to **No**, and cannot proceed while a converter is running or stopping. Only transient queue records are removed: imported EPUBs, saved M4Bs/WAVs, raw narration cache, frozen pronunciation snapshots, immutable completed-part receipts, and never-reused job IDs all remain. This is useful when choosing the wrong **Sections per part** count: after clearing, return to **Generate**, choose the correct size, and add the chapters again. Previously unfinished chapters will need requeueing; verified finished chapters remain recorded in the permanent history.
 - **V2.10.4 SSD cache preflight and recovery:** The GUI and headless runner now check the narration-cache directory and any external SSD symlink **before** marking a job running or launching Chatterbox. A missing mount pauses generation with the queued job preserved, rather than producing a repeated converter traceback or silently replacing the cache. Queue shows storage readiness and approximate free capacity, with **Check storage & resume** to resume the exact waiting job or the normal queue order after remounting. Optional **Auto-resume when SSD returns** (off by default, remembered across sessions) checks every 15 seconds **only while the current session is waiting for cache storage**. Manual Pause/Stop cancels pending auto-resume; launching Studio again does not automatically launch pending jobs. The headless runner exits with an actionable storage error while preserving the job's existing status. Cache inspection is read-only and does not mount drives or alter audio.
 - **V2.10.3 drag-and-drop stability hotfix:** Corrects a Qt-specific regression where QTableWidget's native MoveAction deleted source table cells *after* the application had already saved the new queue order and refreshed the view, leaving blank rows and misleading execution order. Dragging now uses a copy-only signal and delegates the actual reorder entirely to SQLite; a final refresh after the drag loop restores the table from the authoritative database. **Move up/down/end**, current-part generation, output files, caching, and saved queue metadata are unchanged. Blank rows in V2.10.2 were a display bug; reopen the GUI after finishing the current conversion to load the fix.
@@ -108,6 +109,48 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Private mobile dashboard (V2.11.0)
+
+The Android/iOS phone dashboard works while the desktop GUI is open. It
+is not a separate server-side converter, and requires no Flask installation.
+
+1. After the current conversion finishes, update and restart Studio.
+   Open **Settings → Mobile dashboard** and enable the local listener.
+   It binds only to localhost port 8765. Use **Copy access key**.
+2. With Tailscale connected on the laptop, run:
+
+   ```fish
+   tailscale serve --bg 8765
+   tailscale serve status
+   ```
+
+   This makes the dashboard available only to your **private tailnet**
+   with HTTPS. Tailscale may require HTTPS certificates to be enabled.
+   Do not use Tailscale Funnel or router port forwarding.
+3. Connect the phone to the same Tailscale network, open the HTTPS URL
+   shown by Serve and enter the access key. You can optionally remember
+   it on a trusted phone, or keep it only until the browser session ends.
+4. Use the dashboard to monitor progress and manage queued work.
+   You can upload EPUBs (up to 24 MiB) and create parts with frozen
+   pronunciation/voice settings. Add the link to your phone home screen.
+
+**Pause after part** completes the active M4B and disables automatic
+continuation. **Stop safely** asks the backend to terminate gracefully,
+preserving previously cached chunks, but does not open an unattended
+desktop force-stop dialog. Clearing the whole queue requires a second
+typed confirmation. No phone action can force-delete active conversions.
+
+The dashboard requires an authenticated access key for every API call,
+refuses cross-origin writes, limits upload size, and runs only on
+localhost. All queue/database updates occur on the Qt main thread.
+Rotate the access key in Settings to revoke previous phone sessions.
+
+**Limitations:** Studio must remain running, with the laptop powered,
+awake and its SSD mounted. This initial version does not run independently
+when Studio is closed, or deliver push notifications when the browser
+is closed. Disable sharing with `tailscale serve off` if desired (this
+can also disable other services Tailscale is sharing).
 
 ## Clearing the entire queue (V2.10.5)
 

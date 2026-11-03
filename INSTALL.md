@@ -245,6 +245,35 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.11.0: Mobile dashboard over private Tailscale Serve
+
+To control AudiobookAI remotely from Android, keep Studio running and open
+**Settings → Mobile dashboard**. Enable the listener and copy the secret key.
+
+On the laptop, while Tailscale is connected:
+
+```fish
+tailscale serve --bg 8765
+tailscale serve status
+```
+
+Open the private HTTPS URL printed by the second command on your Android
+phone, also signed into Tailscale. Paste the access key to connect. The
+server listens only on **127.0.0.1:8765**, not your public IP.
+**Never use Tailscale Funnel or public port forwarding.**
+
+The dashboard can view current progress/ETA/logs, start, run only one part,
+pause after a part, request a graceful stop, reorder/retry/clear jobs, and
+add selected book sections with batch size/narrator/expressive delivery.
+You can also upload EPUB files up to 24 MiB.
+
+All calls are authenticated and executed on the Studio GUI thread. The
+phone cannot run shell commands or open arbitrary files. No new pip packages
+are required. Studio must remain open, and your laptop awake and on the
+network. This version is not an always-on daemon and has no background push
+notifications. To stop sharing use `tailscale serve off`; to revoke previous
+phone sessions use **Regenerate access key** on the laptop.
+
 ### V2.10.5: Clear all conversion queue entries
 
 Use **Queue → Clear entire queue…** to remove all pending, interrupted,

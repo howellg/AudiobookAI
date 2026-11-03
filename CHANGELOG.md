@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.11.0 — Private mobile control dashboard
+
+- Add opt-in authenticated, localhost-only HTTP dashboard for Android/iOS browsers, reachable securely through private Tailscale Serve (not public Funnel).
+- Run all mobile requests on Qt GUI thread using a bounded transport queue; avoid concurrent SQLite writers and competing converters.
+- Live progress/ETA, saved queue ordering, logs and storage status. Start, pause after part, stop gracefully, retry, move and clear queue entries remotely.
+- Upload a new EPUB with size and archive limits; queue section ranges with part size, narrator and expressive mode, preserving immutable pronunciation snapshots.
+- Add secret-key rotation, explicit enable/disable controls, Content Security Policy, bearer access checks and origin validation.
+- Studio must remain open and awake; this initial version has no standalone background daemon or closed-browser push notifications.
+
+
 ## 2.10.5 — Clear entire conversion queue
 
 - Add **Clear entire queue…** alongside **Clear finished jobs** on Queue. Remove queued, interrupted, failed, and completed transient records in one confirmation-guided operation, independent of queue filtering.
