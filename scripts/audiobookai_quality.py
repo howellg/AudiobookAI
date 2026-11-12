@@ -330,8 +330,13 @@ def quality_preflight(folder, chapters):
         if any((folder / 'chapters' / f'{idx:04d}.wav').stat().st_mtime > scanned_time
                for idx in chapters):
             return 'Quality-control results are stale: chapter audio changed after the scan.'
-        errors = [x for x in report['issues'] if x['severity'] == 'error' and x['chapter'] in requested]
-        warnings = [x for x in report['issues'] if x['severity'] == 'warning' and x['chapter'] in requested]
+        from audiobookai_quality_review import load_states, status_of
+        states = load_states(folder)
+        unresolved = [x for x in report['issues']
+                      if x.get('chapter') in requested
+                      and status_of(x, folder, states) == 'needs_review']
+        errors = [x for x in unresolved if x['severity'] == 'error']
+        warnings = [x for x in unresolved if x['severity'] == 'warning']
         if errors:
             return f'Quality control: {len(errors)} errors, {len(warnings)} warnings. Review before archiving.'
         return f'Quality control: {len(warnings)} warnings, no hard errors.'

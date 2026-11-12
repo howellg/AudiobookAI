@@ -22,6 +22,9 @@ class CacheManagerTests(unittest.TestCase):
         self.output=root/'output';self.output.mkdir()
         self.cache=self.output/'narration_cache_v2';self.cache.mkdir()
         self.work=self.output/'cache_manager'
+        self.converter_patch = patch.object(cm, '_active_conversion', return_value=False)
+        self.converter_patch.start()
+        self.addCleanup(self.converter_patch.stop)
         self.catalog=self.work/'catalog.sqlite3'
         self.voice=root/'voices'/'british_narrator.wav'
         self.voice.parent.mkdir()
@@ -196,6 +199,39 @@ class CacheManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'expired'):
             self.delete(report)
         self.assertTrue(old.exists())
+
+    def test_indexes_merge_standard_and_expressive_mode_bits(self):
+        first=self.add('Narration prose reused between modes.',mode='standard',
+                       indexed=True,tracked=False)
+        second=self.add('Narration prose reused between modes.',mode='expressive',
+                        indexed=True,tracked=False)
+        self.assertEqual(first,second)
+        self.scan()
+        with cm._db(self.catalog) as db:
+            modes=db.execute('SELECT modes FROM entries WHERE name=?',(first.name,)).fetchone()
+        self.assertEqual(modes,(3,))
+
+    def test_index_backfill_preserves_recent_engine_last_seen(self):
+        wav=self.add('A recently reused chapter prose line.',mode='standard',
+                     indexed=True,tracked=True,age=150)
+        with cm._db(self.catalog) as db:
+            db.execute('UPDATE entries SET last_seen=? WHERE name=?',
+                       (time.time(),wav.name))
+        self.scan(scope='all')
+        with cm._db(self.catalog) as db:
+            last_used=db.execute('SELECT last_seen FROM entries WHERE name=?',
+                                 (wav.name,)).fetchone()[0]
+        self.assertLess(time.time()-last_used,60)
+        self.assertEqual(self.scan(scope='all')['candidate_files'],0)
+
+    def test_dialogue_flag_from_saved_index_overrides_quote_heuristic(self):
+        wav=self.add('He said it with no opening quotation mark.',
+                     mode='expressive',indexed=True,tracked=False,dialogue=True)
+        self.scan()
+        with cm._db(self.catalog) as db:
+            recorded=db.execute('SELECT dialogue,exaggeration FROM entries '
+                                'WHERE name=?',(wav.name,)).fetchone()
+        self.assertEqual(recorded,(1,.48))
 
 
 if __name__=='__main__':

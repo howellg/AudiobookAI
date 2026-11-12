@@ -214,10 +214,14 @@ class GUIActionsTests(unittest.TestCase):
         self.assertTrue(all(self.store.job(i)['pronunciation_required'] for i in ids))
         self.assertTrue(all((self.snaps/f'job_{i}.json').is_file() for i in ids))
         self.assertEqual([r['id'] for r in self.store.jobs()], ids)
+        # A separate expressive/standard narrator edition must be allowed.
+        second=self.app.mobile_add_jobs(dict(book_id=self.book_id,ranges='1-2',
+            batch_size=2,voice='default',acting_mode='standard'))
+        self.assertEqual(len(second['job_ids']),1)
         with self.assertRaisesRegex(ValueError,'already have jobs'):
             self.app.mobile_add_jobs(dict(book_id=self.book_id,ranges='1-2',
-                batch_size=2,voice='default',acting_mode='standard'))
-        self.assertEqual(len(self.store.jobs()),3)
+                batch_size=2,voice='default',acting_mode='expressive'))
+        self.assertEqual(len(self.store.jobs()),4)
 
     def test_unqueued_story_selection_never_duplicates_finished(self):
         first=self.store.add_job(self.book_id, 'Original', [2,3], 'part_original')

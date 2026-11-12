@@ -71,7 +71,8 @@ def import_voice(source: Path) -> Path:
     """Copy an external recording into the user's voices library (never overwrite)."""
     source = validate_voice(source)
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
-    if source.parent == VOICE_DIR or VOICE_DIR in source.parents:
+    if (source.parent == VOICE_DIR or VOICE_DIR in source.parents) and (
+            source != SNAPSHOT_DIR and SNAPSHOT_DIR not in source.parents):
         return source
     # A queue stores a fingerprinted copy, not a mutable filename alone.
     digest = sha256_file(source)[:12]

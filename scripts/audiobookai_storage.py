@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -40,9 +41,11 @@ def read_config(path=CONFIG_PATH):
     if path.is_file():
         try:
             parsed = json.loads(path.read_text(encoding='utf-8'))
-            for k in ('enabled', 'host', 'port', 'database', 'user', 'use_keyring'):
-                if k in parsed.get('mysql', {}):
-                    cfg['mysql'][k] = parsed['mysql'][k]
+            mysql = parsed.get('mysql') if isinstance(parsed, dict) else None
+            if isinstance(mysql, dict):
+                for k in ('enabled', 'host', 'port', 'database', 'user', 'use_keyring'):
+                    if k in mysql:
+                        cfg['mysql'][k] = mysql[k]
         except (ValueError, OSError, AttributeError):
             pass
     return cfg
@@ -94,8 +97,12 @@ from audiobookai_acting import validate_acting_mode
 class Store:
     """SQLite canonical store, backwards-compatible with V2's jobs/books."""
 
-    def __init__(self, path):
-        """Open SQLite, create missing tables and columns, and mark abandoned jobs interrupted."""
+    def __init__(self, path, *, recover_stale=True):
+        """Open SQLite and optionally mark abandoned jobs interrupted.
+
+        Read-only inspection clients may open while the primary Studio is live;
+        only the process that owns the queue should perform crash recovery.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
@@ -184,9 +191,41 @@ class Store:
             if (output.is_file() and output.suffix.lower() == '.m4b'
                     and output.stem == old['output_name'] and output.stat().st_size > 1024):
                 self._record_completed(old, output, recorded_at=old['finished'])
-        # A process cannot still be generating after a fresh launch.
-        self.db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (now(),))
+        # Only the primary runner is allowed to migrate abandoned jobs. Never
+        # mark an active converter interrupted for a secondary inspection.
+        if recover_stale:
+            self.db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (now(),))
         self.db.commit()
+
+    @contextmanager
+    def atomic(self, name):
+        """One logical mutation, with a savepoint inside a caller transaction.
+
+        A failed job allocation must never roll back unrelated outer writes.
+        Nested calls intentionally leave their outer transaction uncommitted.
+        """
+        nested = self.db.in_transaction
+        if nested:
+            self.db.execute(f'SAVEPOINT audiobookai_{name}')
+        else:
+            self.db.execute('BEGIN IMMEDIATE')
+        state = {'changed': True}
+        try:
+            yield state
+        except Exception:
+            if nested:
+                self.db.execute(f'ROLLBACK TO SAVEPOINT audiobookai_{name}')
+                self.db.execute(f'RELEASE SAVEPOINT audiobookai_{name}')
+            else:
+                self.db.rollback()
+            raise
+        else:
+            if nested:
+                self.db.execute(f'RELEASE SAVEPOINT audiobookai_{name}')
+            elif state['changed']:
+                self.changed()
+            else:
+                self.db.rollback()
 
     def changed(self):
         """Commit the transaction and notify the GUI that its optional mirror is dirty."""
@@ -259,9 +298,7 @@ class Store:
         # Taking the write lock before reading max(id) avoids concurrent GUI
         # instances allocating the same row ID. Store mutations are committed
         # synchronously through changed() as in previous releases.
-        if not self.db.in_transaction:
-            self.db.execute('BEGIN IMMEDIATE')
-        try:
+        with self.atomic('add_job'):
             highest_db = self.db.execute('SELECT COALESCE(MAX(id), 0) FROM jobs').fetchone()[0]
             sequence = self.db.execute(
                 "SELECT last_id FROM job_id_sequence WHERE name='jobs'").fetchone()
@@ -293,11 +330,7 @@ class Store:
                  1 if pronunciation_required else 0, acting_mode, next_position))
             self.db.execute('''INSERT INTO job_id_sequence(name,last_id) VALUES('jobs',?)
                 ON CONFLICT(name) DO UPDATE SET last_id=excluded.last_id''', (new_id,))
-            self.changed()
-            return new_id
-        except Exception:
-            self.db.rollback()
-            raise
+        return new_id
 
     def set_job_voice(self, job_id, voice_path):
         """Change a narrator only before execution; reset stale progress counters."""
@@ -335,8 +368,7 @@ class Store:
         """
         if not isinstance(new_index, int) or isinstance(new_index, bool):
             raise ValueError('Queue destination must be a row index.')
-        self.db.execute('BEGIN IMMEDIATE')
-        try:
+        with self.atomic('move_job') as state:
             rows = self.db.execute(
                 'SELECT id,status FROM jobs ORDER BY queue_position,id').fetchall()
             ids = [row['id'] for row in rows]
@@ -347,18 +379,14 @@ class Store:
                 raise ValueError('Only pending queued jobs can be moved; active parts stay running.')
             destination = max(0, min(new_index, len(ids) - 1))
             if source == destination:
-                self.db.rollback()
+                state['changed'] = False
                 return False
             ids.pop(source)
             ids.insert(destination, job_id)
             self.db.executemany(
                 'UPDATE jobs SET queue_position=? WHERE id=?',
                 [(index, item_id) for index, item_id in enumerate(ids, start=1)])
-            self.changed()
-            return True
-        except Exception:
-            self.db.rollback()
-            raise
+        return True
 
     def update_job(self, job_id, status, output_path=None, error=''):
         """Persist status, finished time, last error, and export location."""
@@ -378,9 +406,15 @@ class Store:
             part = part_number_from_name(job['name'])
         if part is None:
             found = self.db.execute('''SELECT COALESCE(MAX(part_number),0) FROM completed_parts
-                WHERE book_id=? AND COALESCE(voice_path,'')=?''',
-                (job['book_id'], job['voice_path'] or '')).fetchone()[0]
+                WHERE book_id=? AND COALESCE(voice_path,'')=? AND acting_mode=?''',
+                (job['book_id'], job['voice_path'] or '',
+                 job['acting_mode'] if 'acting_mode' in job.keys() else 'standard')).fetchone()[0]
             part = found + 1
+        if job['id'] is not None:
+            # Retrying the same source job may produce a new path; keep only
+            # its newly verified receipt, without violating source_job_id UNIQUE.
+            self.db.execute('DELETE FROM completed_parts WHERE source_job_id=? '
+                            'AND output_path<>?', (job['id'], str(path)))
         self.db.execute('''INSERT INTO completed_parts
             (book_id,source_job_id,part_number,indices,output_name,output_path,
              voice_path,finished,size_bytes,acting_mode)
@@ -409,17 +443,11 @@ class Store:
                 or path.name != job['output_name'] + '.m4b'
                 or path.stat().st_size <= 1024):
             raise ValueError('Cannot archive a missing, partial or mismatched M4B')
-        if not self.db.in_transaction:
-            self.db.execute('BEGIN IMMEDIATE')
-        try:
+        with self.atomic('complete_job'):
             self._record_completed(job, path)
             self.db.execute('''UPDATE jobs SET status='complete',output_path=?,
                 error='',finished=?,updated=? WHERE id=?''',
                 (str(path), now(), now(), job_id))
-            self.changed()
-        except Exception:
-            self.db.rollback()
-            raise
 
     def completed_parts(self, book_id=None):
         """Permanent export receipts, including parts removed from the queue."""
@@ -432,15 +460,20 @@ class Store:
             WHERE completed_parts.book_id=? ORDER BY completed_parts.part_number,completed_parts.id''',
             (book_id,)).fetchall()
 
-    def next_part_number(self, book_id, voice_path=None, folder=None):
+    def next_part_number(self, book_id, voice_path=None, folder=None, acting_mode=None):
         """Allocate after archived, queued and on-disk parts (including deleted jobs)."""
         voice = str(voice_path) if voice_path else ''
-        maximum = self.db.execute('''SELECT COALESCE(MAX(part_number),0)
-            FROM completed_parts WHERE book_id=? AND COALESCE(voice_path,'')=?''',
-            (book_id, voice)).fetchone()[0]
-        for row in self.db.execute('''SELECT output_name,name FROM jobs
-                WHERE book_id=? AND COALESCE(voice_path,'')=?''',
-                (book_id, voice)):
+        where = "book_id=? AND COALESCE(voice_path,'')=?"
+        params = [book_id, voice]
+        if acting_mode is not None:
+            validate_acting_mode(acting_mode)
+            where += ' AND acting_mode=?'
+            params.append(acting_mode)
+        maximum = self.db.execute(
+            f'SELECT COALESCE(MAX(part_number),0) FROM completed_parts WHERE {where}',
+            params).fetchone()[0]
+        for row in self.db.execute(
+                f'SELECT output_name,name FROM jobs WHERE {where}', params):
             part = part_number_from_name(row['output_name']) or part_number_from_name(row['name'])
             if part:
                 maximum = max(maximum, part)
@@ -451,7 +484,7 @@ class Store:
                     maximum = max(maximum, part)
         return maximum + 1
 
-    def recover_legacy_exports(self, book_id, folder, voice_path=None):
+    def recover_legacy_exports(self, book_id, folder, voice_path=None, *, probe_timeout=30):
         """Import *verifiable* legacy completed files whose queue row was erased.
 
         Older versions encoded contiguous section ranges in their filenames.
@@ -484,7 +517,9 @@ class Store:
                     ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
                      '-show_entries', 'stream=codec_name:format=duration:chapter=start_time,end_time',
                      '-of', 'json', str(output)],
-                    capture_output=True, text=True, check=True, timeout=30)
+                    capture_output=True, text=True, check=True,
+                    timeout=max(float(probe_timeout),
+                                min(240, 30 + output.stat().st_size // (256 * 1024 * 1024) * 20)))
                 info = json.loads(probe.stdout)
                 valid = (bool(info.get('streams'))
                          and float(info.get('format', {}).get('duration') or 0) > 0
@@ -562,8 +597,7 @@ class Store:
         Refuse deletion while ANY job is running or stopping, even if the GUI
         missed a competing/headless process. SQLite remains authoritative.
         """
-        self.db.execute('BEGIN IMMEDIATE')
-        try:
+        with self.atomic('clear_all_jobs') as state:
             active = self.db.execute(
                 "SELECT 1 FROM jobs WHERE status IN ('running','stopping') LIMIT 1"
             ).fetchone()
@@ -574,14 +608,9 @@ class Store:
                 )
             cursor = self.db.execute('DELETE FROM jobs')
             count = cursor.rowcount
-            if count:
-                self.changed()
-            else:
-                self.db.rollback()
-            return count
-        except Exception:
-            self.db.rollback()
-            raise
+            if not count:
+                state['changed'] = False
+        return count
 
     def prune_recorded_jobs(self):
         """Clear only completed queue rows already backed by permanent receipts.
@@ -597,31 +626,57 @@ class Store:
             self.changed()
         return count
 
-    def claimed_sections(self, book_id):
+    def claimed_sections(self, book_id, *, voice_path=None, acting_mode=None):
         """Find sections already covered by queued, running, or complete jobs."""
-        rows = list(self.db.execute("SELECT indices FROM jobs WHERE book_id=? AND status IN ('queued','running','complete')",
-                               (book_id,)).fetchall())
-        rows.extend(self.db.execute('SELECT indices FROM completed_parts WHERE book_id=?',
-                                    (book_id,)).fetchall())
+        where = 'book_id=?'
+        params = [book_id]
+        if voice_path is not None:
+            where += " AND COALESCE(voice_path,'')=?"
+            params.append(str(voice_path))
+        if acting_mode is not None:
+            validate_acting_mode(acting_mode)
+            where += ' AND acting_mode=?'
+            params.append(acting_mode)
+        rows = list(self.db.execute(
+            f"SELECT indices FROM jobs WHERE {where} AND status IN ('queued','running','complete')",
+            params).fetchall())
+        rows.extend(self.db.execute(f'SELECT indices FROM completed_parts WHERE {where}',
+                                    params).fetchall())
         return {int(i) for row in rows for i in json.loads(row['indices'])}
 
     def snapshot(self):
         """Consistent, small metadata snapshot; no EPUB or audio data copied."""
         # Include the permanent receipts in the same consistent metadata snapshot.
-        self.db.execute('BEGIN')
+        own_transaction = not self.db.in_transaction
+        if own_transaction:
+            self.db.execute('BEGIN')
         try:
             tables = ('books', 'book_sections', 'jobs', 'completed_parts')
             result = {table: [dict(r) for r in self.db.execute(f'SELECT * FROM {table}').fetchall()]
                       for table in tables}
-            self.db.commit()
+            if own_transaction:
+                self.db.commit()
             return result
         except Exception:
-            self.db.rollback()
+            if own_transaction:
+                self.db.rollback()
             raise
 
     def close(self):
-        """Release the SQLite connection."""
-        self.db.close()
+        """Commit pending local writes safely before closing; safe if already closed."""
+        try:
+            try:
+                pending = self.db.in_transaction
+            except sqlite3.ProgrammingError:
+                return
+            if pending:
+                try:
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
+        finally:
+            self.db.close()
 
 
 class MySQLMirror:

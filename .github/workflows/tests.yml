@@ -27,4 +27,6 @@ jobs:
       - name: Compile scripts
         run: python -m compileall -q scripts tests
       - name: Run offline suite
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s tests -v

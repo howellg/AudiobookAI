@@ -37,12 +37,16 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def validate_rule(term: str, spoken: str) -> dict[str, str]:
     """Require nonempty, single-line, reasonably sized speech substitutions."""
-    term = re.sub(r'[ \t]+', ' ', term.strip())
-    spoken = re.sub(r'[ \t]+', ' ', spoken.strip())
-    if not term or not spoken:
-        raise ValueError('Both the written term and spoken text are required.')
+    if not isinstance(term, str) or not isinstance(spoken, str):
+        raise ValueError('Pronunciation entries must be text.')
     if any(c in term + spoken for c in '\r\n\x00'):
         raise ValueError('Pronunciation entries must stay on one line.')
+    # Normalize non-breaking and other Unicode inline spaces before mapping
+    # keys and multiword regex patterns are built.
+    term = re.sub(r'\s+', ' ', term.strip())
+    spoken = re.sub(r'\s+', ' ', spoken.strip())
+    if not term or not spoken:
+        raise ValueError('Both the written term and spoken text are required.')
     if len(term) > MAX_TERM_LENGTH or len(spoken) > MAX_SPOKEN_LENGTH:
         raise ValueError('Pronunciation entry is too long.')
     if not (term[0].isalnum() and term[-1].isalnum()):
@@ -169,10 +173,11 @@ def apply_rules(text: str, rules: list) -> str:
     mapping = {r['term'].casefold(): r['spoken'] for r in rules}
     # Sort longest phrases first to keep multiword rules from being shadowed.
     ordered = sorted(rules, key=lambda r: (-len(r['term']), r['term'].casefold()))
-    expressions = [r'(?<!\w)' + r'[ \t]+'.join(map(re.escape, r['term'].split())) + r'(?!\w)'
+    expressions = [r'(?<!\w)' + r'[ \t\u00a0]+'.join(map(re.escape, r['term'].split())) + r'(?!\w)'
                    for r in ordered]
     compiled = re.compile('|'.join('(?:' + part + ')' for part in expressions), re.IGNORECASE)
-    return compiled.sub(lambda match: mapping[re.sub(r'[ \t]+', ' ', match.group()).casefold()], text)
+    return compiled.sub(lambda match: mapping[
+        re.sub(r'[ \t\u00a0]+', ' ', match.group()).casefold()], text)
 
 
 def rules_digest(rules: list) -> str:

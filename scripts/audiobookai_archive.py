@@ -198,16 +198,19 @@ def needs_complete_export(folder: Path, name: str, indices: list[int]) -> bool:
 
 
 def make_archive(epub: Path, folder: Path, indices: list[int], voice: Path | None,
-                 destination: Path, details: dict, cover: Path | None = None) -> Path:
+                 destination: Path, details: dict, cover: Path | None = None,
+                 acting_mode: str = 'standard') -> Path:
     """Refresh a complete edition from WAVs, then package it for long-term storage."""
     # Imports are cheap; GPU engine loading in the converter remains lazy.
     import epub_to_audiobook_v7_studio as converter
     from audiobookai_fullbook import verify_export_group
     # Recheck source validity in the subprocess; UI may have been open for hours.
+    from audiobookai_acting import validate_acting_mode
+    acting_mode = validate_acting_mode(acting_mode)
     group = {'unfinished': [], 'indices': indices, 'voice_path': str(voice) if voice else None,
-             'folder': folder}
+             'folder': folder, 'acting_mode': acting_mode}
     verify_export_group(group, len(converter.load_epub(epub)[2]))
-    expected_folder = converter.book_folder(epub, voice)
+    expected_folder = converter.book_folder(epub, voice, acting_mode)
     if expected_folder.resolve() != folder.resolve():
         raise ValueError('Narrator output folder mismatch')
     title, _author, _sections = converter.load_epub(epub)
@@ -217,6 +220,8 @@ def make_archive(epub: Path, folder: Path, indices: list[int], voice: Path | Non
                    '--chapters', ','.join(str(i) for i in indices), '--output-name', name]
         if voice:
             command += ['--voice', str(voice)]
+        if acting_mode != 'standard':
+            command += ['--acting-mode', acting_mode]
         print('Updating complete audiobook from saved WAVs…', flush=True)
         subprocess.run(command, check=True)
     full = folder / f'{name}.m4b'
@@ -241,6 +246,7 @@ def main() -> None:
     parser.add_argument('--folder', type=Path, required=True)
     parser.add_argument('--indices', required=True)
     parser.add_argument('--voice', type=Path)
+    parser.add_argument('--acting-mode', choices=('standard', 'expressive'), default='standard')
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--title', default='')
     parser.add_argument('--author', default='')
@@ -257,7 +263,7 @@ def main() -> None:
         details['cover'] = str(args.cover)
     result = make_archive(args.epub.resolve(), args.folder.resolve(), sorted(indices),
                           args.voice.resolve() if args.voice else None, args.destination, details,
-                          args.cover)
+                          args.cover, args.acting_mode)
     print(f'Archive ready: {result}', flush=True)
 
 

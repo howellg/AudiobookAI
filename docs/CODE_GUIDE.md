@@ -1,6 +1,6 @@
 # AudiobookAI code walkthrough
 
-This guide accompanies the inline comments and Python docstrings. It describes the **uploaded V2.4 source tree**, not an imagined future API. Start here if you are reading or contributing to AudiobookAI for the first time.
+This guide accompanies the inline comments and Python docstrings. It describes the **V2.14.2 source tree** and the current verified workflows. Start here if you are reading or contributing to AudiobookAI for the first time.
 
 ## Start here: which scripts matter?
 
@@ -16,7 +16,13 @@ This guide accompanies the inline comments and Python docstrings. It describes t
 | `scripts/audiobookai_production.py` | Chunk indexes, original/replacement takes, quality checks, and guarded cache cleanup |
 | `scripts/audiobookai_editor.py` | Chapter chunk editor; sends regeneration and rebuild requests to the converter |
 | `scripts/audiobookai_convenience.py` | Small independent helpers for selection and duration estimates |
-| `tests/` | Automated regression tests for storage, output, narrator isolation, recovery, and safety checks |
+| Cache Manager module (scripts/audiobookai_cache_manager.py) | Verified cache inventory, provenance profiles and guarded cleanup |
+| Quality Control and review modules | Read-only chapter/chunk inspections and persistent review/dismiss state |
+| Mobile dashboard modules (scripts/audiobookai_mobile.py and scripts/mobile/) | Loopback-only authenticated API and mobile UI |
+| Headless runner (scripts/audiobookai_headless.py) | Headless execution and non-mutating job-list inspection |
+| Archive and pronunciation modules | Mode-aware complete-book archival and frozen voice/pronunciation rules |
+| ntfy integration (scripts/audiobookai_ntfy.py) | Best-effort Android push alerts |
+| tests/ | Automated regressions including independent-model bug audit and process safety |
 
 **Historical scripts:** `audiobook_gui.py`, `epub_to_audiobook.py`, `epub_to_audiobook_v7_smooth.py`, and the `test_five_minutes_v6*.py` files are kept for comparison or backwards compatibility. Don't assume they are used by the current Studio queue.
 
