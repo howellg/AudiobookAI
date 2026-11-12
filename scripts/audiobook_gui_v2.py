@@ -66,6 +66,9 @@ from audiobookai_reliability import (
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
 )
 from audiobookai_quality import quality_preflight, EVENT_PREFIX as QC_EVENT_PREFIX
+from audiobookai_quality_review import (load_states as load_quality_states,
+    status_of as quality_issue_status, set_status as set_quality_status,
+    counts as quality_review_counts)
 from audiobookai_pronunciation import (
     scoped_rules, effective_rules, save_rule, delete_rule, apply_rules,
     snapshot_for_job, snapshot_path_for_job,
@@ -240,7 +243,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.12.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.13.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -317,6 +320,15 @@ class Studio(QMainWindow):
         self.log_detailed = self.prefs.value('detailed_generation_log', False, type=bool)
         self.backup_dir = ROOT / 'output' / 'metadata_backups'
         self.diagnostic_dir = ROOT / 'output' / 'diagnostics'
+        # Jobs recorded during this GUI session are scanned only after queue
+        # generation has finished. Never scan while Chatterbox owns the GPU.
+        self.auto_quality_completed = {}
+        self.auto_quality_pending = []
+        self.auto_quality_scanning = False
+        self.auto_quality_attention = 0
+        self.auto_quality_failed = 0
+        self.auto_quality_cancelled = False
+        self.auto_quality_restart_queue = False
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -331,7 +343,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.12.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.13.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -1150,10 +1162,21 @@ class Studio(QMainWindow):
         self.quality_target = None
         self.quality_report = None
         self.quality_visible_issues = []
+        auto_row = QHBoxLayout()
+        self.quality_auto = QCheckBox('Automatically inspect audio after the queue finishes')
+        self.quality_auto.setChecked(self.prefs.value('quality/auto_scan', True, type=bool))
+        self.quality_auto.toggled.connect(
+            lambda checked: self.prefs.setValue('quality/auto_scan', checked))
+        auto_row.addWidget(self.quality_auto)
+        auto_row.addStretch()
+        l.addLayout(auto_row)
         bar = QHBoxLayout()
         self.quality_deep = QCheckBox('Inspect available individual speech chunks (slower)')
         self.quality_deep.setToolTip('Checks the original/edited WAVs if they are still available. '
             'Removed raw caches are not treated as damaged finished narration.')
+        self.quality_deep.setChecked(self.prefs.value('quality/deep', False, type=bool))
+        self.quality_deep.toggled.connect(
+            lambda checked: self.prefs.setValue('quality/deep', checked))
         bar.addWidget(self.quality_deep)
         bar.addStretch()
         self.quality_scan_button = mk_button('Scan audio', self.scan_quality)
@@ -1174,24 +1197,32 @@ class Studio(QMainWindow):
         results_bar.addStretch()
         results_bar.addWidget(QLabel('Show:'))
         self.quality_filter = QComboBox()
-        self.quality_filter.addItems(['All issues', 'Errors only', 'Warnings only'])
+        self.quality_filter.addItems([
+            'Needs review', 'All issues', 'Errors only',
+            'Warnings only', 'Reviewed', 'Dismissed'])
         self.quality_filter.currentIndexChanged.connect(self.quality_show_issues)
         results_bar.addWidget(self.quality_filter)
         l.addLayout(results_bar)
-        self.quality_table = QTableWidget(0, 5)
-        self.quality_table.setHorizontalHeaderLabels(['Severity', 'EPUB #', 'Chunk', 'Issue', 'Time'])
+        self.quality_table = QTableWidget(0, 6)
+        self.quality_table.setHorizontalHeaderLabels([
+            'Severity', 'EPUB #', 'Chunk', 'Issue', 'Time', 'Review status'])
         self.setup_table(self.quality_table)
         self.quality_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         l.addWidget(self.quality_table, 1)
         commands = QHBoxLayout()
         commands.addWidget(mk_button('Review selected chapter…', self.quality_open_editor))
         commands.addWidget(mk_button('Play flagged WAV', self.quality_play_audio))
+        commands.addWidget(mk_button('Mark reviewed', lambda: self.quality_mark('reviewed')))
+        commands.addWidget(mk_button('Dismiss', lambda: self.quality_mark('dismissed')))
+        commands.addWidget(mk_button('Reopen', lambda: self.quality_mark('needs_review')))
         commands.addWidget(mk_button('Open report folder', self.quality_open_folder))
         commands.addStretch()
         l.addLayout(commands)
-        note = QLabel('Warnings require listening, not automatic rejection. The chapter WAV is authoritative; '
-            'raw speech caches may be safely deleted after a chapter is assembled. '
-            'A fresh report is also summarized before complete-book export.')
+        note = QLabel('Auto-QC runs after the queue empties, in a separate CPU-only process. '
+            'Deep chunk checks are optional and slower. Scan findings are advisory: '
+            'no audio is regenerated or rejected automatically. '
+            'Reviewed/dismissed decisions reset if their WAV changes. '
+            'The chapter WAV is authoritative; deleted raw caches are not audio failures.')
         note.setWordWrap(True)
         note.setObjectName('muted')
         l.addWidget(note)
@@ -1269,11 +1300,14 @@ class Studio(QMainWindow):
                 self.quality_report = json.loads(path.read_text(encoding='utf-8'))
                 r = self.quality_report
                 m = r.get('metrics', {})
+                reviewed = quality_review_counts(r, group['folder'])
                 self.quality_status.setText(
                     f"Last scan: {m.get('chapters_scanned', 0)} chapters, "
                     f"{m.get('chunks_scanned', 0)} chunks; "
                     f"{r.get('errors', 0)} errors, {r.get('warnings', 0)} warnings. "
-                    f"{m.get('raw_chunks_unavailable', 0)} raw cache chunks unavailable (not errors).")
+                    f"{reviewed['needs_review']} need review "
+                    f"({reviewed['reviewed']} reviewed, {reviewed['dismissed']} dismissed). "
+                    f"{m.get('raw_chunks_unavailable', 0)} missing raw chunks (not errors).")
                 self.quality_progress.setValue(100)
             except (ValueError, OSError, TypeError):
                 self.quality_status.setText('Saved scan report is unreadable. Run a fresh scan.')
@@ -1282,72 +1316,85 @@ class Studio(QMainWindow):
         self.quality_show_issues()
 
     def quality_show_issues(self, *_):
-        """Render report issues in one Qt table refresh, not on each WAV read."""
-        all_issues = (self.quality_report or {}).get('issues', [])
-        selected = self.quality_filter.currentIndex()
-        wanted = 'error' if selected == 1 else 'warning' if selected == 2 else None
-        self.quality_visible_issues = [x for x in all_issues if wanted is None or x.get('severity') == wanted][:1000]
-        self.quality_table.setRowCount(len(self.quality_visible_issues))
-        for r, entry in enumerate(self.quality_visible_issues):
-            value = (entry.get('severity', '').upper(), str(entry.get('chapter', '')),
-                     str(entry.get('chunk') or '—'), entry.get('message', ''),
-                     fmt_seconds(entry['seconds']) if entry.get('seconds') is not None else '—')
-            for col, val in enumerate(value):
-                cell = self.quality_table.item(r, col)
-                if cell is None:
-                    self.quality_table.setItem(r, col, item(val))
-                elif cell.text() != val:
-                    cell.setText(val)
-        if len(all_issues) > 1000:
-            self.quality_status.setText(self.quality_status.text() + ' Showing first 1,000 issues.')
-
-    def scan_quality(self):
-        """Start a separate read-only process; never scan large WAVs inside Qt."""
-        if self.quality_proc is not None:
-            return
-        if self.proc is not None or self.full_export_proc is not None:
-            QMessageBox.information(self, 'Audio is busy',
-                'Finish the current conversion or complete-book export before scanning.')
-            return
-        editor = getattr(self, 'editor_dialog', None)
-        if editor is not None and editor.isVisible() and editor.proc is not None:
-            QMessageBox.information(self, 'Audio editor busy', 'Finish editing before scanning.')
-            return
+        """Filter by severity and persistent audio-revision-aware review state."""
         group = self.quality_selected_group()
-        if not group:
-            QMessageBox.information(self, 'No audiobook parts', 'Choose a book with queued parts first.')
+        folder = group['folder'] if group else None
+        all_issues = (self.quality_report or {}).get('issues', [])
+        states = load_quality_states(folder) if folder else {}
+        visible = []
+        for problem in all_issues:
+            status = quality_issue_status(problem, folder, states) if folder else 'needs_review'
+            selected = self.quality_filter.currentIndex()
+            if selected == 0 and status != 'needs_review':
+                continue
+            if selected == 2 and problem.get('severity') != 'error':
+                continue
+            if selected == 3 and problem.get('severity') != 'warning':
+                continue
+            if selected == 4 and status != 'reviewed':
+                continue
+            if selected == 5 and status != 'dismissed':
+                continue
+            visible.append((problem, status))
+        self.quality_visible_issues = [i for i, _ in visible[:1000]]
+        self.quality_table.setRowCount(len(self.quality_visible_issues))
+        for r, (entry, review) in enumerate(visible[:1000]):
+            values = (entry.get('severity', '').upper(), str(entry.get('chapter', '')),
+                      str(entry.get('chunk') or '—'), entry.get('message', ''),
+                      fmt_seconds(entry['seconds']) if entry.get('seconds') is not None else '—',
+                      review.replace('_', ' ').capitalize())
+            for col, val in enumerate(values):
+                existing = self.quality_table.item(r, col)
+                if existing is None:
+                    self.quality_table.setItem(r, col, item(val))
+                elif existing.text() != val:
+                    existing.setText(val)
+
+    def quality_mark(self, new_status):
+        """Keep manual review decisions independent of fresh scanner results."""
+        issue = self.quality_current_issue()
+        group = self.quality_selected_group()
+        if not issue or not group:
+            self.statusBar().showMessage('Select a flagged issue first.')
             return
-        required = set()
-        for job in group['parts']:
-            if job['status'] == 'complete':
-                required.update(json.loads(job['indices']))
-        # A part in progress may already have assembled chapters. We scan them,
-        # but do not flag yet-to-be-generated chapters as missing.
+        try:
+            set_quality_status(issue, group['folder'], new_status)
+            self.quality_load_report()
+            self.statusBar().showMessage('Quality review state saved. Audio was not modified.')
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not save QC review state', str(exc))
+
+    def quality_chapters(self, folder, required):
+        """Include all assembled chapters and any newly completed required sections."""
         present = set()
-        manifest_path = group['folder'] / 'manifest.json'
-        if manifest_path.is_file():
+        manifest = Path(folder) / 'manifest.json'
+        if manifest.is_file():
             try:
-                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                for key in manifest.get('chapters', {}):
-                    if str(key).isdecimal() and (group['folder'] / 'chapters' / f'{int(key):04d}.wav').is_file():
+                records = json.loads(manifest.read_text(encoding='utf-8')).get('chapters', {})
+                for key in records:
+                    if str(key).isdecimal() and (Path(folder) / 'chapters' / f'{int(key):04d}.wav').is_file():
                         present.add(int(key))
-            except (ValueError, OSError, TypeError):
+            except (ValueError, OSError, TypeError, AttributeError):
                 pass
-        chapters = sorted(required | present)
+        return sorted(set(required) | present)
+
+    def quality_launch(self, folder, chapters, required, *, automatic=False, deep=False):
+        """Start the same independent read-only scanner for manual and auto QC."""
+        if self.quality_proc is not None or self.proc is not None:
+            return False
         if not chapters:
-            QMessageBox.information(self, 'No chapter WAVs yet',
-                'Generate at least one chapter before running a quality scan.')
-            return
-        self.quality_target = group['folder']
+            return False
+        self.auto_quality_scanning = bool(automatic)
+        self.quality_target = Path(folder)
         self.quality_buffer = ''
         self.quality_proc = QProcess(self)
         proc = self.quality_proc
         proc.setProgram(sys.executable)
         args = ['-u', str(SCRIPTS / 'audiobookai_quality.py'),
-                '--folder', str(group['folder']),
+                '--folder', str(folder),
                 '--chapters', ','.join(map(str, chapters)),
                 '--required', ','.join(map(str, sorted(required)))]
-        if self.quality_deep.isChecked():
+        if deep:
             args.append('--deep')
         proc.setArguments(args)
         proc.setWorkingDirectory(str(ROOT))
@@ -1358,8 +1405,92 @@ class Studio(QMainWindow):
         self.quality_scan_button.setEnabled(False)
         self.quality_stop_button.setEnabled(True)
         self.quality_progress.setValue(0)
-        self.quality_status.setText(f'Scanning {len(chapters)} saved chapters; {len(group["unfinished"])} unfinished part(s) are not treated as failures.')
+        label = 'Automatic QC' if automatic else 'QC'
+        self.quality_status.setText(
+            f'{label}: scanning {len(chapters)} chapters; unfinished sections are excluded.')
         proc.start()
+        return True
+
+    def scan_quality(self):
+        """Manual scan requires completed audio and an idle converter."""
+        if self.quality_proc is not None:
+            return
+        if self.proc is not None or self.full_export_proc is not None:
+            QMessageBox.information(self, 'Audio is busy',
+                'Finish conversion or complete-book export before scanning.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible() and editor.proc is not None:
+            QMessageBox.information(self, 'Audio editor busy', 'Finish editing before scanning.')
+            return
+        group = self.quality_selected_group()
+        if not group:
+            QMessageBox.information(self, 'No audiobook parts',
+                                    'Choose a book with saved narration first.')
+            return
+        required = set()
+        for job in group.get('parts', []):
+            if job.get('status') == 'complete':
+                required.update(json.loads(job['indices']))
+        chapters = self.quality_chapters(group['folder'], required)
+        if not chapters:
+            QMessageBox.information(self, 'No chapter WAVs yet',
+                                    'Generate at least one chapter before scanning.')
+            return
+        self.quality_launch(group['folder'], chapters, required,
+                            deep=self.quality_deep.isChecked())
+
+    def quality_record_completion(self, job):
+        """Note only verified completed parts; never queue an automatic scan mid-TTS."""
+        if not self.quality_auto.isChecked() or not job:
+            return
+        try:
+            self.converter = self.converter or load_converter()
+            voice = Path(job['voice_path']) if job['voice_path'] else None
+            folder = self.converter.book_folder(
+                Path(job['book_path']), voice, job['acting_mode'])
+            entries = self.auto_quality_completed.setdefault(str(folder), set())
+            entries.update(int(i) for i in json.loads(job['indices']))
+        except (OSError, ValueError, TypeError, KeyError):
+            self.write_log('Auto-QC: could not identify completed part; manual scan is available.')
+
+    def quality_queue_drained(self):
+        """Schedule completed editions, but never scan while generation is running."""
+        if not self.quality_auto.isChecked() or not self.auto_quality_completed:
+            return
+        for folder, required in self.auto_quality_completed.items():
+            self.auto_quality_pending.append((Path(folder), set(required)))
+        self.auto_quality_completed.clear()
+        self.auto_quality_attention = 0
+        self.auto_quality_failed = 0
+        self.auto_quality_cancelled = False
+        self.quality_next_automatic()
+
+    def quality_next_automatic(self):
+        if self.proc is not None or self.run_queue or self.full_export_proc is not None:
+            return
+        if self.quality_proc is not None:
+            return
+        if not self.quality_auto.isChecked():
+            self.auto_quality_pending.clear()
+            self.auto_quality_attention = 0
+            return
+        if not self.auto_quality_pending:
+            if self.auto_quality_attention:
+                post_optional_alert(self, 'quality_attention')
+            self.statusBar().showMessage(
+                f'Automatic QC finished: {self.auto_quality_attention} issues need review'
+                f'; {self.auto_quality_failed} scan failures.')
+            self.auto_quality_attention = 0
+            self.auto_quality_failed = 0
+            return
+        folder, required = self.auto_quality_pending.pop(0)
+        chapters = self.quality_chapters(folder, required)
+        if not self.quality_launch(
+                folder, chapters, required, automatic=True,
+                deep=self.quality_deep.isChecked()):
+            self.auto_quality_failed += 1
+            QTimer.singleShot(50, self.quality_next_automatic)
 
     def quality_process_output(self):
         """Consume machine-readable worker progress without rebuilding issue rows."""
@@ -1393,6 +1524,10 @@ class Studio(QMainWindow):
                 self.quality_scan_button.setEnabled(True)
                 self.quality_stop_button.setEnabled(False)
                 p.deleteLater()
+                if self.auto_quality_scanning:
+                    self.auto_quality_scanning = False
+                    self.auto_quality_failed += 1
+                    QTimer.singleShot(100, self.quality_next_automatic)
 
     def quality_finished(self, exit_code, exit_status):
         """Release the worker, then load one atomic report into the issues table."""
@@ -1404,18 +1539,54 @@ class Studio(QMainWindow):
         self.quality_scan_button.setEnabled(True)
         self.quality_stop_button.setEnabled(False)
         successful = exit_code == 0 and exit_status == QProcess.NormalExit
+        automatic = self.auto_quality_scanning
+        self.auto_quality_scanning = False
+        target = self.quality_target
         p.deleteLater()
         if successful:
-            self.quality_load_report()
+            selected = self.quality_selected_group()
+            if selected and Path(selected['folder']).resolve() == Path(target).resolve():
+                self.quality_load_report()
             self.quality_progress.setValue(100)
-            self.statusBar().showMessage('Quality Control scan complete.')
+            if automatic:
+                try:
+                    report = json.loads((Path(target) / 'quality_reports' / 'summary.json')
+                                        .read_text(encoding='utf-8'))
+                    tally = quality_review_counts(report, target)
+                    self.auto_quality_attention += tally['needs_review']
+                    self.quality_status.setText(
+                        f"Automatic QC complete: {report['errors']} errors, "
+                        f"{report['warnings']} warnings; {tally['needs_review']} need review.")
+                    self.write_log(f"Automatic QC: {tally['needs_review']} findings need review "
+                                   f"({report['errors']} errors, {report['warnings']} warnings).")
+                except (OSError, ValueError, TypeError, KeyError):
+                    self.auto_quality_failed += 1
+            else:
+                self.statusBar().showMessage('Quality Control scan complete.')
         else:
-            self.quality_status.setText('QC scan stopped or failed; existing reports and WAVs remain unchanged.')
-            self.statusBar().showMessage('Quality Control scan stopped or failed.')
+            self.quality_status.setText('QC scan stopped or failed; audio remains unchanged.')
+            if automatic:
+                self.auto_quality_failed += 1
+        if automatic:
+            if self.auto_quality_cancelled:
+                self.auto_quality_cancelled = False
+                self.quality_status.setText('Automatic QC cancelled; audio and reports preserved.')
+            else:
+                QTimer.singleShot(150, self.quality_next_automatic)
+        elif self.auto_quality_pending:
+            QTimer.singleShot(150, self.quality_next_automatic)
+        if self.auto_quality_restart_queue:
+            self.auto_quality_restart_queue = False
+            if self.run_queue:
+                QTimer.singleShot(150, self.continue_queue_if_requested)
 
     def stop_quality(self):
         """Stop only the independent scanner, leaving all audio and jobs intact."""
         if self.quality_proc is not None:
+            if self.auto_quality_scanning:
+                self.auto_quality_cancelled = True
+                self.auto_quality_pending.clear()
+                self.auto_quality_attention = 0
             self.quality_proc.kill()
 
     def quality_current_issue(self):
@@ -1462,6 +1633,18 @@ class Studio(QMainWindow):
                 self.review_table.selectRow(r)
                 self.review_table.scrollToItem(cell)
                 self.open_chunk_editor()
+                editor = getattr(self, 'editor_dialog', None)
+                number = problem.get('chunk')
+                if editor is not None and isinstance(number, int) and number > 0:
+                    def focus_chunk():
+                        if editor.isVisible():
+                            for i in range(editor.table.rowCount()):
+                                cell = editor.table.item(i, 0)
+                                if cell is not None and cell.text() == str(number):
+                                    editor.table.selectRow(i)
+                                    editor.table.scrollToItem(cell)
+                                    return
+                    QTimer.singleShot(150, focus_chunk)
                 return
         QMessageBox.information(self, 'Chapter not ready',
             'This chapter has no assembled WAV to edit yet. Rebuild the missing chapter first.')
@@ -2339,6 +2522,7 @@ class Studio(QMainWindow):
             ('queue_complete', 'Notify when the automatic queue finishes'),
             ('generation_failed', 'Notify when a part fails'),
             ('storage_unavailable', 'Notify when the narration cache SSD is unavailable'),
+            ('quality_attention', 'Notify when automatic quality checks find issues'),
         ):
             control = QCheckBox(title)
             control.setChecked(bool(self.notifier and self.notifier.config['events'][key]))
@@ -3790,6 +3974,16 @@ class Studio(QMainWindow):
 
     def start_queue(self):
         """Start the next pending job unless paused or already generating."""
+        if getattr(self, 'auto_quality_scanning', False) and getattr(self, 'quality_proc', None) is not None:
+            self.stop_quality()
+            self.run_queue = True
+            self.auto_quality_restart_queue = True
+            # The worker's finished() callback will resume only if not paused.
+            # Never run a converter concurrently with the CPU WAV audit.
+            return
+        if getattr(self, 'quality_proc', None) is not None:
+            self.statusBar().showMessage('Finish or stop the manual QC scan before starting narration.')
+            return
         if self.proc is not None:
             self.run_queue = True
             return
@@ -3833,6 +4027,10 @@ class Studio(QMainWindow):
 
     def start_job(self, job_id):
         """Create a separate converter process with fixed sections, narrator, and output name."""
+        if getattr(self, 'quality_proc', None) is not None:
+            self.run_queue = False
+            self.statusBar().showMessage('Finish or stop the QC scan before generating.')
+            return
         if headless_runner_active():
             self.run_queue = False
             self.statusBar().showMessage('Headless converter active; GUI generation paused.')
@@ -4156,6 +4354,9 @@ class Studio(QMainWindow):
                 good = False
                 self.write_log(f'Could not record verified export: {exc}')
         if good:
+            record_quality = getattr(self, 'quality_record_completion', None)
+            if record_quality is not None:
+                record_quality(job)
             self.refresh_saved_parts()
             self.chapter_progress.setValue(1000)
             self.overall_progress.setValue(1000)
@@ -4186,6 +4387,9 @@ class Studio(QMainWindow):
         self.stop_requested = False
         self.refresh_jobs()
         self.refresh_review()
+        if good and self.store.next_job() is None and getattr(self, 'auto_quality_completed', None):
+            # Defer scanning until converter QProcess has fully unwound.
+            QTimer.singleShot(900, self.quality_queue_drained)
         if self.run_queue and good:
             if self.store.next_job() is None:
                 # Only notify after the verified M4B and permanent receipt

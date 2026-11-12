@@ -47,11 +47,18 @@ EVENTS = {
         'priority': '4',
         'tags': 'warning',
     },
+    'quality_attention': {
+        'title': 'AudiobookAI - quality review needed',
+        'message': 'Automatic quality checks flagged audio that may need review. Open Studio Quality Control.',
+        'priority': '3',
+        'tags': 'headphones,warning',
+    },
 }
 DEFAULT_FLAGS = {
     'queue_complete': True,
     'generation_failed': True,
     'storage_unavailable': True,
+    'quality_attention': True,
 }
 
 
@@ -64,10 +71,13 @@ def _validated(config: dict) -> dict:
     if type(config.get('enabled')) is not bool:
         raise ValueError('Notification enabled field must be boolean.')
     flags = config.get('events')
-    if not isinstance(flags, dict) or any(type(flags.get(k)) is not bool for k in DEFAULT_FLAGS):
+    # V2.12.0 profiles lack newer alert types. Preserve their topic and
+    # existing choices while enabling safe defaults for additional events.
+    if not isinstance(flags, dict) or any(type(flags.get(k, DEFAULT_FLAGS[k])) is not bool
+                                          for k in DEFAULT_FLAGS):
         raise ValueError('Notification event settings are invalid.')
     return {'topic': topic, 'enabled': config['enabled'],
-            'events': {key: flags[key] for key in DEFAULT_FLAGS}}
+            'events': {key: flags.get(key, default) for key, default in DEFAULT_FLAGS.items()}}
 
 
 def read_config(path: Path = CONFIG_PATH) -> dict:

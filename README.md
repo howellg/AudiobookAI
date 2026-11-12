@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.12.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.13.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.13.0 automatic post-queue quality control:** After the last queued part finishes and its M4B/receipt are verified, optionally run the existing read-only CPU WAV scanner on the completed narrator editions. Automatic QC does not compete with TTS or edit audio, and reports critical errors vs review warnings in **Quality Control**. The scanner preserves issue review decisions separately as **Needs review / Reviewed / Dismissed**, resetting them if the underlying chapter/chunk audio changes. From the report, you can open the flagged chapter and focus a specific chunk in the editor. Enable slower deep chunk checks as needed. An optional generic ntfy alert fires once after an automatic QC batch if issues remain to review; previous V2.12.0 notification topics are preserved and the new alert setting is added automatically. See QC setup below.
 - **V2.12.0 optional ntfy.sh Android notifications:** Receive queue-finished, generation-failed, and cache-SSD-unavailable alerts via ntfy's hosted HTTPS service **without leaving Tailscale connected on your phone**. Generic, privacy-minded messages contain no book titles, paths, or diagnostics. Notifications send on background threads and never block Chatterbox or Qt. The 192-bit secret topic and settings are stored in ignored, user-readable-only `output/ntfy.json`. Enable/disable individual alerts, copy the topic and send a test from Settings. The ntfy.sh topic is public to anyone who knows its name; **treat the topic as a secret**. See Android setup below.
 - **V2.11.0 private phone dashboard:** A responsive, authenticated web dashboard (no new Python dependencies) displays live progress, job queue, ETA, logs, library and SSD status. Add and reorder jobs, select section ranges/part sizes/narrator/expressive mode, upload a new EPUB (24 MiB limit), start, safely pause after part, gracefully stop, retry, or clear queue entries. Studio remains the **single controller**: HTTP requests run through the Qt main thread so there is no competing converter or independent SQLite writer. The service binds to **127.0.0.1:8765**, is **off by default**, and requires a randomly generated access key. Reach it privately over HTTPS with **Tailscale Serve**, never Funnel. Studio must remain open and the laptop awake. See setup below.
 - **V2.10.5 clear entire queue:** **Queue → Clear entire queue…** removes all queue entries (queued, interrupted, failed, and completed) at once, even if a filter is active. A confirmation shows the number and statuses of affected parts, defaults to **No**, and cannot proceed while a converter is running or stopping. Only transient queue records are removed: imported EPUBs, saved M4Bs/WAVs, raw narration cache, frozen pronunciation snapshots, immutable completed-part receipts, and never-reused job IDs all remain. This is useful when choosing the wrong **Sections per part** count: after clearing, return to **Generate**, choose the correct size, and add the chapters again. Previously unfinished chapters will need requeueing; verified finished chapters remain recorded in the permanent history.
@@ -110,6 +111,47 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Automatic Quality Control and review history (V2.13.0)
+
+In **Quality Control**, the **Automatically inspect audio after the queue
+finishes** checkbox is enabled by default and remembered across restarts.
+After the last M4B is verified and the queue has no pending parts, Studio
+starts its existing read-only WAV scanner in a separate CPU process for
+the narrator editions completed during that session. It scans recorded
+chapters, with all sections from the new verified parts treated as
+required; ungenerated portions of the book are never flagged as missing.
+Each edition's results are saved to its usual
+`quality_reports/summary.json`.
+
+- The default automatic pass inspects assembled chapter WAVs for damage,
+  missing/too-short recordings, significant internal silence, clipping,
+  and manifest sample-rate/duration mismatches. Tick **Inspect available
+  individual speech chunks (slower)** to add deep raw/edited chunk checks
+  for short or unusually long speech; this reads many files and may take
+  longer for large novels. Removed raw-cache chunks are not failures.
+- Issues are sorted with **errors first**, warnings second. Quality
+  Control defaults to **Needs review**; you can filter All, Errors,
+  Warnings, Reviewed or Dismissed. Use **Play flagged WAV** or
+  **Review selected chapter** to open the chunk editor and focus the
+  flagged chunk. **Mark reviewed**, **Dismiss**, and **Reopen** are
+  non-destructive.
+- Review decisions are stored in
+  `quality_reports/review_state.json` beside the report. They survive
+  rescans/restarts but expire if the relevant chapter or chunk WAV
+  changes; repaired audio should be reviewed again.
+- If any findings still need review after automatic checks on all
+  completed narrator editions, AudiobookAI sends **one generic ntfy
+  notification** (if enabled), without book titles or private paths.
+  The older ntfy topic and the three existing alert choices are retained.
+- Automatic QC starts **only after queue completion**, not on every
+  chapter or part. Manually stopping the scanner cancels remaining auto
+  scans. Starting a new queue takes priority over an automatic scan.
+  Audio is never automatically regenerated, changed, or deleted.
+
+Waveform QC cannot reliably identify mispronunciations, incorrect words
+that sound natural, or every cut-off sentence. Always listen when
+deciding whether a warning needs repair.
 
 ## Android push notifications using ntfy.sh (V2.12.0)
 
