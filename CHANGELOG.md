@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.15.1 — Chapter completion notifications
+
+- Add an opt-in ntfy alert for each newly saved chapter WAV in Studio.
+  A resumed conversion skips alerts for already completed chapters.
+- Show the finished chapter in the private queue activity timeline.
+
 ## 2.15.0 — Queue activity and stall alerts
 
 - Show recent converter launches, narration, M4B export, verified completion,

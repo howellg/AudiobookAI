@@ -248,7 +248,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.15.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.15.1')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -295,6 +295,7 @@ class Studio(QMainWindow):
         self.buffer = ''
         self.plan = {}
         self.done_chunks = {}
+        self.saved_chapters = set()
         self.total_chunks = 0
         self.chunk_durations = deque(maxlen=40)
         # Includes fast cache hits, unlike the legacy generated-only ETA sample.
@@ -357,7 +358,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.15.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.15.1 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -2573,6 +2574,7 @@ class Studio(QMainWindow):
             ('queue_complete', 'Notify when the automatic queue finishes'),
             ('generation_failed', 'Notify when a part fails'),
             ('storage_unavailable', 'Notify when the narration cache SSD is unavailable'),
+            ('chapter_complete', 'Notify when a chapter finishes'),
             ('queue_stalled', 'Notify when the queue stops making progress'),
             ('quality_attention', 'Notify when automatic quality checks find issues'),
         ):
@@ -3768,7 +3770,7 @@ class Studio(QMainWindow):
             'queue_activity': list(activity.events)[-12:],
             'queue_status': activity.status,
             'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
-            'version': '2.15.0', 'run_queue': bool(self.run_queue),
+            'version': '2.15.1', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -4349,6 +4351,7 @@ class Studio(QMainWindow):
         self.recent_chunk_durations.clear()
         self.plan.clear()
         self.done_chunks.clear()
+        self.saved_chapters.clear()
         self.total_chunks = 0
         self.current_section = None
         self.current_chunk = self.current_total = 0
@@ -4453,6 +4456,15 @@ class Studio(QMainWindow):
                 self.done_chunks[idx] = int(self.plan[idx]['chunks'])
             self.current_section = idx
             self.current_chunk = self.current_total = int(event['chunks'])
+            if (event.get('cached') is False and self.active_job_id is not None
+                    and idx not in self.saved_chapters):
+                self.saved_chapters.add(idx)
+                if activity is not None:
+                    title = self.plan.get(idx, {}).get('title')
+                    label = f'Section {idx}: {title}' if title else f'Section {idx}'
+                    activity.record(f'{label} · chapter audio saved', self.active_job_id)
+                    Studio.refresh_queue_activity(self)
+                post_optional_alert(self, 'chapter_complete')
         elif kind == 'export_started':
             self.exporting = True
             self.chapter_text.setText('Encoding M4B…')

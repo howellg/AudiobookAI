@@ -47,6 +47,12 @@ EVENTS = {
         'priority': '4',
         'tags': 'warning',
     },
+    'chapter_complete': {
+        'title': 'AudiobookAI - chapter finished',
+        'message': 'A chapter finished and its audio was saved. Open Studio for details.',
+        'priority': '3',
+        'tags': 'headphones',
+    },
     'queue_stalled': {
         'title': 'AudiobookAI - queue may be stalled',
         'message': 'Progress has stopped for longer than expected. Check Studio queue activity.',
@@ -66,6 +72,7 @@ DEFAULT_FLAGS = {
     'storage_unavailable': True,
     'quality_attention': True,
     'queue_stalled': False,
+    'chapter_complete': False,
 }
 
 
@@ -79,7 +86,7 @@ def _validated(config: dict) -> dict:
         raise ValueError('Notification enabled field must be boolean.')
     flags = config.get('events')
     # V2.12.0 profiles lack newer alert types. Preserve their topic and
-    # existing choices while enabling safe defaults for additional events.
+    # existing choices and use defaults for additional events.
     if not isinstance(flags, dict) or any(type(flags.get(k, DEFAULT_FLAGS[k])) is not bool
                                           for k in DEFAULT_FLAGS):
         raise ValueError('Notification event settings are invalid.')

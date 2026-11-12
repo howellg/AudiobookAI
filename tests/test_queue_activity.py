@@ -154,6 +154,28 @@ class StudioHandoffTests(unittest.TestCase):
         self.assertEqual(studio.mobile_status_snapshot()['queue_status'], 'Encoding M4B')
         studio.proc = None
 
+    def test_new_chapter_alerts_before_export_and_resume_skips_saved_audio(self):
+        studio = self.studio
+        studio.maybe_auto_metadata_backup = Mock()
+        studio.start_queue()
+        studio.progress_event({'event': 'plan', 'sections': [
+            {'index': 1, 'title': 'Previously saved', 'chunks': 1, 'completed': True},
+            {'index': 2, 'title': 'New chapter', 'chunks': 1, 'completed': False},
+        ]})
+        studio.progress_event({'event': 'chapter_done', 'index': 1, 'chunks': 1, 'cached': True})
+        studio.progress_event({'event': 'chunk_done', 'index': 2, 'chunk': 1, 'total': 1})
+        studio.notify_ntfy.assert_not_called()
+
+        saved = {'event': 'chapter_done', 'index': 2, 'chunks': 1, 'cached': False}
+        studio.progress_event(saved)
+        studio.progress_event(saved)
+        studio.notify_ntfy.assert_called_once_with('chapter_complete')
+        activity = studio.mobile_status_snapshot()['queue_activity']
+        self.assertEqual(sum('New chapter · chapter audio saved' in row for row in activity), 1)
+        self.assertFalse(any('Previously saved' in row for row in activity))
+        self.assertFalse(studio.exporting)
+        studio.proc = None
+
     def test_qprocess_failure_is_reported_without_phantom_running_job(self):
         studio = self.studio
         studio.maybe_auto_metadata_backup = Mock()
