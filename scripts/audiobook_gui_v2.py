@@ -33,7 +33,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, QSettings, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut, QPalette
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QMessageBox, QFileDialog, QInputDialog, QPlainTextEdit,
     QProgressBar, QPushButton, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QLineEdit, QScrollArea,
@@ -248,7 +248,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.15.1')
+        self.setWindowTitle('AudiobookAI Studio — V2.16.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -358,7 +358,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.15.1 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.16.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -783,6 +783,9 @@ class Studio(QMainWindow):
         additional.addStretch()
         l.addLayout(additional)
         storage_controls = QHBoxLayout()
+        storage_controls.addWidget(mk_button('Check entire queue…',
+            self.show_queue_preflight,
+            'Inspect every queued part and estimate storage before starting a run'))
         storage_controls.addWidget(mk_button('Check storage & resume',
             self.check_storage_and_resume,
             'Check the cache SSD without writing files; resume only a queue paused by missing storage'))
@@ -3770,7 +3773,7 @@ class Studio(QMainWindow):
             'queue_activity': list(activity.events)[-12:],
             'queue_status': activity.status,
             'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
-            'version': '2.15.1', 'run_queue': bool(self.run_queue),
+            'version': '2.16.0', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -4073,6 +4076,61 @@ class Studio(QMainWindow):
                 self.statusBar().showMessage('Previously waiting part is no longer queued.')
         else:
             self.statusBar().showMessage('Cache storage ready. Click Start queue to continue.')
+
+    def show_queue_preflight(self):
+        """Display a read-only report using the current execution-order snapshot."""
+        jobs = [job for job in self.store.jobs() if job['status'] == 'queued']
+        if not jobs:
+            QMessageBox.information(self, 'Queue preflight', 'No queued parts to check.')
+            return
+        fields = ('id', 'status', 'book_title', 'name', 'book_path', 'voice_path',
+                  'pronunciation_required', 'indices', 'acting_mode')
+        request = json.dumps({
+            'jobs': [{key: job[key] for key in fields} for job in jobs],
+            'cache_dir': str(CACHE_DIR),
+        }).encode('utf-8')
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Queue preflight')
+        dialog.resize(780, 550)
+        layout = QVBoxLayout(dialog)
+        report = QPlainTextEdit('Checking queued parts…')
+        report.setReadOnly(True)
+        report.setAccessibleName('Queue preflight report')
+        layout.addWidget(report)
+        close_button = QPushButton('Close')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+
+        worker = QProcess(dialog)
+        worker.setProgram(sys.executable)
+        worker.setArguments([str(SCRIPTS / 'audiobookai_queue_preflight.py')])
+        worker.setWorkingDirectory(str(ROOT))
+
+        def send_request():
+            worker.write(request)
+            worker.closeWriteChannel()
+
+        def show_report(exit_code, exit_status):
+            if exit_code or exit_status != QProcess.NormalExit:
+                report.setPlainText('Queue preflight could not complete. Check the local installation.')
+                return
+            try:
+                lines = json.loads(bytes(worker.readAllStandardOutput()))
+                report.setPlainText('\n'.join(lines))
+            except (ValueError, TypeError):
+                report.setPlainText('Queue preflight returned an invalid report.')
+
+        worker.started.connect(send_request)
+        worker.finished.connect(show_report)
+        worker.errorOccurred.connect(
+            lambda error: report.setPlainText('Queue preflight could not start: ' + worker.errorString())
+            if error == QProcess.FailedToStart else None)
+        worker.start()
+        dialog.exec()
+        if worker.state() != QProcess.NotRunning:
+            worker.kill()
+            worker.waitForFinished(1000)
+        dialog.deleteLater()
 
     def show_queue_mode(self, message):
         """Report queue behavior without changing the stored user preferences."""

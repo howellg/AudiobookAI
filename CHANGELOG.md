@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.16.0 — Entire queue preflight
+
+- Check every queued part for unreadable EPUBs, invalid section selections,
+  unusable narrator WAVs, and missing or invalid pronunciation snapshots.
+- Report cache SSD readiness and estimate chapter WAV, raw cache, and M4B
+  storage by filesystem. The read-only check runs separately from Studio.
+
 ## 2.15.1 — Chapter completion notifications
 
 - Add an opt-in ntfy alert for each newly saved chapter WAV in Studio.
