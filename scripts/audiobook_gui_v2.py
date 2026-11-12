@@ -60,6 +60,7 @@ from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
 from audiobookai_headless import headless_runner_active
 from audiobookai_cache import cache_preflight
 from audiobookai_mobile import MobileBridge, MobileHTTPServer, DEFAULT_PORT
+from audiobookai_ntfy import NtfyPublisher, CONFIG_PATH as NTFY_CONFIG_PATH
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
     diagnostic_hint, job_log_path, latest_backup, verify_metadata_backup,
@@ -158,6 +159,13 @@ class QueueTableWidget(QTableWidget):
         event.accept()
 
 
+def post_optional_alert(controller, event):
+    """Optional notifications must not affect isolated queue controllers or GUI tests."""
+    notify = getattr(controller, 'notify_ntfy', None)
+    if notify is not None:
+        notify(event)
+
+
 def fmt_seconds(seconds):
     """Format a number of elapsed or estimated seconds for progress labels."""
     if seconds is None:
@@ -232,9 +240,17 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.11.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.12.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
+        # Notification configuration is an ignored, mode-0600 local file.
+        # A broken notification config must never prevent Studio from opening.
+        self.notification_init_error = ''
+        try:
+            self.notifier = NtfyPublisher(path=NTFY_CONFIG_PATH)
+        except (OSError, ValueError) as exc:
+            self.notifier = None
+            self.notification_init_error = str(exc)[:200]
         self.mobile_bridge = MobileBridge()
         self.mobile_http = None
         self.mobile_token = str(self.prefs.value('mobile/access_key', '') or '')
@@ -315,7 +331,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.11.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.12.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -396,6 +412,9 @@ class Studio(QMainWindow):
         self.full_export_ui_timer.timeout.connect(self.update_full_export_progress_display)
         # All mobile commands are executed on Qt's GUI thread; the HTTP
         # threads only enqueue requests. No extra SQLite writer or TTS process.
+        self.ntfy_timer = QTimer(self)
+        self.ntfy_timer.setInterval(700)
+        self.ntfy_timer.timeout.connect(self.poll_ntfy)
         self.mobile_timer = QTimer(self)
         self.mobile_timer.setInterval(120)
         self.mobile_timer.timeout.connect(
@@ -2299,6 +2318,56 @@ class Studio(QMainWindow):
         mobile_tip.setTextInteractionFlags(Qt.TextSelectableByMouse)
         l.addWidget(mobile_tip)
 
+        l.addWidget(title_label('Android notifications · ntfy.sh', 14))
+        notify_intro = QLabel(
+            'Send queue-finished, generation-failed and cache-SSD alerts over '
+            'outgoing HTTPS. Your phone receives them without Tailscale. '
+            'ntfy.sh topics are public to anyone who knows the topic: '
+            'keep your random topic private. Alerts contain no book names, '
+            'EPUB text, filesystem paths or logs.')
+        notify_intro.setWordWrap(True)
+        notify_intro.setObjectName('muted')
+        l.addWidget(notify_intro)
+        self.ntfy_enabled = QCheckBox('Enable Android notifications')
+        self.ntfy_enabled.setChecked(bool(
+            self.notifier and self.notifier.config['enabled']))
+        self.ntfy_enabled.setEnabled(self.notifier is not None)
+        self.ntfy_enabled.toggled.connect(self.toggle_ntfy)
+        l.addWidget(self.ntfy_enabled)
+        self.ntfy_checks = {}
+        for key, title in (
+            ('queue_complete', 'Notify when the automatic queue finishes'),
+            ('generation_failed', 'Notify when a part fails'),
+            ('storage_unavailable', 'Notify when the narration cache SSD is unavailable'),
+        ):
+            control = QCheckBox(title)
+            control.setChecked(bool(self.notifier and self.notifier.config['events'][key]))
+            control.setEnabled(self.notifier is not None)
+            control.toggled.connect(
+                lambda enabled, which=key: self.change_ntfy_event(which, enabled))
+            self.ntfy_checks[key] = control
+            l.addWidget(control)
+        ntfy_buttons = QHBoxLayout()
+        self.ntfy_copy = mk_button('Copy ntfy topic', self.copy_ntfy_topic,
+            'Copy the private topic name to subscribe in the ntfy Android app.')
+        self.ntfy_test = mk_button('Send test notification', self.send_ntfy_test,
+            'Send a single test message using HTTPS (requires notifications enabled).')
+        self.ntfy_copy.setEnabled(self.notifier is not None)
+        self.ntfy_test.setEnabled(self.notifier is not None)
+        ntfy_buttons.addWidget(self.ntfy_copy)
+        ntfy_buttons.addWidget(self.ntfy_test)
+        ntfy_buttons.addStretch()
+        l.addLayout(ntfy_buttons)
+        self.ntfy_status = QLabel(
+            'Notification config error: ' + self.notification_init_error
+            if self.notifier is None else
+            ('Notifications enabled; subscribe on ntfy.sh using Copy ntfy topic.'
+             if self.notifier.config['enabled'] else
+             'Notifications disabled. Enable them, then send a test.'))
+        self.ntfy_status.setWordWrap(True)
+        self.ntfy_status.setObjectName('muted')
+        l.addWidget(self.ntfy_status)
+
         l.addWidget(title_label('Chatterbox models · offline-first', 14))
         self.model_status = QLabel(
             'Narration uses locally cached Chatterbox models by default; no '
@@ -3249,6 +3318,77 @@ class Studio(QMainWindow):
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_dir.resolve())))
 
+    def toggle_ntfy(self, enabled):
+        if self.notifier is None:
+            return
+        try:
+            self.notifier.update(enabled=enabled)
+            self.ntfy_status.setText(
+                'Notifications enabled. Subscribe in the ntfy Android app.'
+                if enabled else 'Notifications disabled.')
+        except (OSError, ValueError):
+            self.ntfy_enabled.blockSignals(True)
+            self.ntfy_enabled.setChecked(not enabled)
+            self.ntfy_enabled.blockSignals(False)
+            self.ntfy_status.setText('Could not save notification settings.')
+
+    def change_ntfy_event(self, which, enabled):
+        if self.notifier is None:
+            return
+        try:
+            self.notifier.update(event=which, checked=enabled)
+        except (OSError, ValueError):
+            control = self.ntfy_checks[which]
+            control.blockSignals(True)
+            control.setChecked(not enabled)
+            control.blockSignals(False)
+            self.ntfy_status.setText('Could not save notification settings.')
+
+    def copy_ntfy_topic(self):
+        if self.notifier is None:
+            return
+        QApplication.clipboard().setText(self.notifier.config['topic'])
+        self.ntfy_status.setText(
+            'Topic copied. In Android ntfy, subscribe on ntfy.sh to this topic. '
+            'Anyone with this topic can read alerts; keep it private.')
+
+    def send_ntfy_test(self):
+        if self.notifier is None:
+            return
+        if self.notify_ntfy('test'):
+            self.ntfy_status.setText('Sending ntfy test in background…')
+        else:
+            self.ntfy_status.setText(
+                'Enable notifications first, then send a test.')
+
+    def notify_ntfy(self, event):
+        """Never block or fail audiobook conversion for an optional alert."""
+        if self.notifier is None:
+            return False
+        try:
+            queued = self.notifier.notify(event)
+            if queued:
+                self.ntfy_timer.start()
+            return queued
+        except Exception:
+            # Notifications are best effort. Never leak topic or interrupt TTS.
+            return False
+
+    def poll_ntfy(self):
+        if self.notifier is None:
+            self.ntfy_timer.stop()
+            return
+        results, pending = self.notifier.drain()
+        for result in results:
+            if result.sent:
+                self.ntfy_status.setText(
+                    f'ntfy {result.event.replace("_", " ")} sent to ntfy.sh.')
+            else:
+                self.ntfy_status.setText(
+                    f'ntfy {result.event.replace("_", " ")}: {result.detail}')
+        if pending == 0:
+            self.ntfy_timer.stop()
+
     def start_saved_mobile_dashboard(self):
         """Restore explicit opt-in after the GUI has fully initialized."""
         if self.mobile_enabled.isChecked():
@@ -3591,6 +3731,7 @@ class Studio(QMainWindow):
 
     def defer_for_storage(self, job_id, detail):
         """Keep the job queued and pause safely if its cache drive is offline."""
+        first_warning = not self.storage_waiting
         self.storage_waiting = True
         self.storage_wait_queue = bool(self.run_queue)
         self.storage_wait_job_id = None if self.run_queue else job_id
@@ -3602,6 +3743,8 @@ class Studio(QMainWindow):
         if detail != self.storage_last_warning:
             self.write_log('Queue paused before launching Chatterbox: ' + detail)
         self.storage_last_warning = detail
+        if first_warning:
+            post_optional_alert(self, 'storage_unavailable')
         if self.storage_auto_resume.isChecked():
             self.storage_timer.start()
 
@@ -3725,6 +3868,7 @@ class Studio(QMainWindow):
         epub = Path(job['book_path'])
         if not epub.is_file():
             self.store.update_job(job_id, 'failed', error='EPUB file missing')
+            post_optional_alert(self, 'generation_failed')
             self.refresh_jobs()
             self.run_queue = False
             self.error('Cannot start conversion', f'EPUB not found: {epub}')
@@ -3740,6 +3884,7 @@ class Studio(QMainWindow):
         snapshot = snapshot_path_for_job(job_id) if job['pronunciation_required'] else None
         if job['pronunciation_required'] and snapshot is None:
             self.store.update_job(job_id, 'failed', error='Queued pronunciation snapshot is missing')
+            post_optional_alert(self, 'generation_failed')
             self.refresh_jobs()
             self.run_queue = False
             self.error('Missing pronunciation snapshot',
@@ -3754,6 +3899,7 @@ class Studio(QMainWindow):
             voice = Path(job['voice_path'])
             if not voice.is_file():
                 self.store.update_job(job_id, 'failed', error='Queued narrator WAV is missing')
+                post_optional_alert(self, 'generation_failed')
                 self.refresh_jobs()
                 self.run_queue = False
                 self.error('Missing narrator WAV', f'The saved narrator for this part is missing: {voice}')
@@ -3981,6 +4127,7 @@ class Studio(QMainWindow):
             self.active_title.setText('Converter failed to start — see log')
             self.refresh_jobs()
             self.statusBar().showMessage('Converter could not start; queue paused.')
+            post_optional_alert(self, 'generation_failed')
 
     def process_finished(self, exit_code, exit_status):
         """Verify an export and transition the job to complete, interrupted, or failed."""
@@ -4026,6 +4173,7 @@ class Studio(QMainWindow):
             self.active_title.setText('Generation failed — see log')
             self.write_log(f'Generation failed (exit code {exit_code}).')
             self.run_queue = False
+            post_optional_alert(self, 'generation_failed')
         self.write_log('Converter exited: ' + ('complete' if good else
             'interrupted' if stopped else f'failed (code {exit_code})'))
         self.active_job_log = None
@@ -4039,6 +4187,10 @@ class Studio(QMainWindow):
         self.refresh_jobs()
         self.refresh_review()
         if self.run_queue and good:
+            if self.store.next_job() is None:
+                # Only notify after the verified M4B and permanent receipt
+                # have been committed; do not ping for every part.
+                post_optional_alert(self, 'queue_complete')
             # Schedule the next job after this signal handler unwinds.
             QTimer.singleShot(350, self.continue_queue_if_requested)
         else:
@@ -4711,6 +4863,7 @@ class Studio(QMainWindow):
                 self.mobile_http.stop()
                 self.mobile_http = None
             self.mobile_timer.stop()
+            self.ntfy_timer.stop()
             if self.mysql_mirror:
                 self.mysql_mirror.disconnect()
             self.store.close()

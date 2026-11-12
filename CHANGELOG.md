@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.12.0 — Optional ntfy.sh phone notifications
+
+- Add a private 192-bit random ntfy topic in ignored `output/ntfy.json`,
+  atomically saved with file mode 0600, and Settings toggles for alerts.
+- Send privacy-minded generic queue-finished, generation-failed and
+  missing-cache-SSD alerts via outgoing HTTPS to ntfy.sh; no Tailscale
+  is needed on Android for these push notifications.
+- Send only when a queued M4B is verified and its permanent completed-part
+  receipt is recorded. No per-chunk or routine part-complete notification.
+  Manual stops do not count as failures.
+- Notifications run in best-effort short-lived background threads with
+  an 8-second timeout, bounded in-flight delivery, and sanitized error
+  feedback; no blocking Qt, Chatterbox, or SQLite.
+- Add **Copy ntfy topic** and **Send test notification** Settings controls
+  and an Android subscription guide.
+- Keep model, queue, raw cache, and narration format unchanged.
+
+
 ## 2.11.0 — Private mobile control dashboard
 
 - Add opt-in authenticated, localhost-only HTTP dashboard for Android/iOS browsers, reachable securely through private Tailscale Serve (not public Funnel).

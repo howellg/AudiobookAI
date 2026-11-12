@@ -245,6 +245,34 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.12.0: ntfy push alerts (no Tailscale needed on Android)
+
+Studio can send outgoing HTTPS notifications to the hosted `ntfy.sh`
+server for verified automatic-queue completion, conversion failures,
+and missing external cache storage. This is optional and never affects
+converter generation or the SQLite queue.
+
+1. Install the **ntfy** Android app (Google Play or F-Droid).
+2. Open **Settings → Android notifications** in Studio, and enable alerts.
+3. Click **Copy ntfy topic** and subscribe to this name on **ntfy.sh**
+   inside the Android ntfy app.
+4. Click **Send test notification** once the phone is subscribed.
+   A received test proves the push path works; the desktop status can
+   separately confirm the server accepted the message.
+
+You do **not** need Tailscale for notifications. Remote browser controls
+still use the private Tailscale Serve address. The ntfy topic is a
+high-entropy, randomly generated secret, saved with permissions 0600 in
+ignored `output/ntfy.json`. Hosted ntfy.sh topics are accessible to
+anyone who learns the topic name. Don't publish the topic, and avoid
+using it for sensitive book titles, content or error logs; AudiobookAI
+only sends generic status messages. No new Python dependencies,
+systemd services, or incoming ports are required.
+
+Notification errors, timeouts or an offline ntfy.sh service will not
+pause or fail an audiobook conversion. Studio must be open for GUI
+notifications. Existing audio and cache files are not modified.
+
 ### V2.11.0: Mobile dashboard over private Tailscale Serve
 
 To control AudiobookAI remotely from Android, keep Studio running and open
