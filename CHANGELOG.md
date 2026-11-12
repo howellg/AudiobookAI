@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.13.0 — Automatic post-queue audio quality checks
+
+- Automatically scan saved chapter WAVs after the full queue's verified
+  M4B exports complete; no CPU scanning while Chatterbox is running.
+- Scan only narrator editions completed in the current session, verify
+  required sections and report errors and review-level warnings using
+  the existing read-only QC worker. Optional deep scans inspect cached
+  chunk WAVs, without treating deleted raw cache as failed chapters.
+- Persist Reviewed/Dismissed/Needs-review states in per-edition
+  quality_reports/review_state.json. Reset decisions when relevant audio
+  changes and prioritize unreviewed errors in the QC table.
+- Open flagged chapters and focus flagged chunks in the existing
+  audio editor. Stop/cancel independent background QC without affecting
+  generated audio or the queue.
+- Send one generic ntfy alert per completed auto-QC batch when findings
+  require attention. Preserve all V2.12.0 topics and alert preferences
+  through a backwards-compatible settings migration.
+- Add offline regression tests for QC state, audio revisions,
+  automatic scan scheduling, and ntfy settings migration.
+
+
 ## 2.12.0 — Optional ntfy.sh phone notifications
 
 - Add a private 192-bit random ntfy topic in ignored `output/ntfy.json`,

@@ -245,6 +245,27 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.13.0: Automatic Quality Control after the queue
+
+Automatic QC is enabled by default from the **Quality Control** page
+and runs in a separate CPU subprocess after the last successful M4B
+export of a queued session. It does not run during Chatterbox narration,
+change files, or start on Studio launch. The existing WAV scanner uses
+the installed `numpy` and `soundfile` dependencies.
+
+The default pass checks chapter WAVs. Enable **Inspect available
+individual speech chunks (slower)** for deeper per-chunk timing and
+amplitude analysis, at the cost of extra SSD reads. Review and dismiss
+issues from Quality Control; decisions live in the narrator's ignored
+`quality_reports/review_state.json` file, separate from the scan
+summary, and reset if underlying WAVs change.
+
+The original ntfy.sh random topic and existing alert toggles are
+preserved; an optional **automatic quality review needed** alert is
+added to the Settings page. One generic alert is sent when an
+automatic QC batch ends with unreviewed findings. Tailscale is not
+required to receive this alert.
+
 ### V2.12.0: ntfy push alerts (no Tailscale needed on Android)
 
 Studio can send outgoing HTTPS notifications to the hosted `ntfy.sh`
