@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.14.2 — Independent model-audit bug fixes
+
+- Restore the full **Metadata backups** Settings UI accidentally removed
+  in 2.14.0. Guard automatic backup status labels so backup UI changes
+  cannot abort a queued converter launch.
+- Archive expressive narrator editions using their recorded acting mode.
+  Include durable completed-parts receipts when rebuilding a chapter
+  after its original queue rows were cleared.
+- Add a GUI instance lock before SQLite startup migration; make headless
+  **--list** non-recovering and display actual SQLite execution order.
+  Guard background cache audits against false process matches.
+- Use nested SQLite savepoints for job allocation, moving, clearing and
+  verifying exports, so a failed operation does not undo a caller's
+  pending transaction. Make metadata snapshots transaction-safe,
+  commit pending writes on close, validate MySQL config structures,
+  handle retried job receipts with updated output paths and scale
+  legacy FFprobe timeouts for very large archives.
+- Respect separate narrator and acting-mode identities for part
+  numbering and mobile queue claims.
+- Apply Reviewed/Dismissed QC states to Integrity/complete-export
+  preflight, avoid invalid-report errors for missing chapter WAVs,
+  and support starting selected narration while automatic QC ends.
+- Preserve stored chapter-index dialogue flags and combined narrator
+  modes during cache backfill. Correct Unicode-whitespace
+  pronunciation matching, imported hidden voice snapshots and
+  mobile narrator dropdown refresh behavior.
+- Harden mobile request cancellation, shutdown and reverse-proxy
+  origin checks without changing authentication of private APIs.
+  Preserve the public login page; reject hostile upload filenames
+  at the HTTP boundary in addition to Studio validation.
+- Correct editor chapter switching, Read Along selection/click
+  highlighting, review folder location, Alt+0 sidebar shortcut,
+  GUI/mobile/package version metadata, and developer code guide.
+- Remove four unreachable duplicate V6 chunking/audio-assembly
+  functions; the existing V7 live algorithms and cache keys are
+  unchanged. Add targeted unit and offscreen GUI regression tests.
+- No existing audio/cache/queue records are modified by migration.
+
+
 ## 2.14.1 — Continuous queue controls clarified
 
 - Desktop **Start queue** continues through all queued parts in SQLite

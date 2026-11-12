@@ -84,7 +84,7 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
     outside = sorted(set(range(1, total + 1)) - expected_set)
     wav_ok = bool(rows) and len(good) == len(rows)
     rate_values = {recorded[str(i)]['sample_rate'] for i in good}
-    compatible = len(rate_values) == 1
+    compatible = len(rate_values) <= 1
     qc_path = folder / 'quality_reports' / 'summary.json'
     qc = 'Not scanned'
     if qc_path.is_file() and good:
@@ -93,10 +93,17 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
             scanned = set(report['chapters'])
             if not expected_set.issubset(scanned):
                 qc = 'Incomplete scan'
-            elif any((folder / 'chapters' / f'{i:04d}.wav').stat().st_mtime > float(report['timestamp']) for i in expected_set):
+            elif expected_set - set(good):
+                qc = 'Missing recorded audio'
+            elif any((folder / 'chapters' / f'{i:04d}.wav').stat().st_mtime >
+                     float(report['timestamp']) for i in good):
                 qc = 'Stale scan'
             else:
-                issues = [issue for issue in report['issues'] if issue.get('chapter') in expected_set]
+                from audiobookai_quality_review import load_states, status_of
+                states = load_states(folder)
+                issues = [issue for issue in report['issues']
+                          if issue.get('chapter') in expected_set
+                          and status_of(issue, folder, states) == 'needs_review']
                 errors = sum(issue.get('severity') == 'error' for issue in issues)
                 warnings = sum(issue.get('severity') == 'warning' for issue in issues)
                 qc = f'{errors} errors, {warnings} warnings' if errors or warnings else 'Passed'

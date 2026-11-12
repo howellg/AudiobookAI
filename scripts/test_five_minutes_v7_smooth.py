@@ -140,65 +140,8 @@ def split_sentences(text: str) -> list[str]:
     return merged
 
 
-def split_long(text: str, max_words: int = MAX_CHUNK_WORDS) -> list[str]:
-    """Choose natural clause splits with a word limit and orphan-tail penalty."""
-    if len(text.split()) <= max_words:
-        return [text]
-    phrases = re.split(r'(?<=[,;:—–])\s+', text)
-    result = []
-    current = []
-    for phrase in phrases:
-        words = phrase.split()
-        if current and len(current) + len(words) > max_words:
-            result.append(' '.join(current))
-            current = []
-        if len(words) > max_words:
-            if current:
-                result.append(' '.join(current))
-                current = []
-            # Emergency word split only for unusually long punctuation-free phrases.
-            result.extend(' '.join(words[i:i + max_words]) for i in range(0, len(words), max_words))
-        else:
-            current.extend(words)
-    if current:
-        result.append(' '.join(current))
-    return result
 
 
-def make_chunks(text: str) -> list[Chunk]:
-    """Split prose at sentence and phrase boundaries while preserving context metadata."""
-    groups = paragraph_groups(text)
-    output = []
-    for paragraph, is_heading in groups:
-        sentences = split_sentences(paragraph)
-        # Combine short neighboring sentences within the SAME paragraph, not
-        # across dialogue paragraphs or distinct speaker changes.
-        combined = []
-        for sentence in sentences:
-            words = len(sentence.split())
-            if (combined and len(combined[-1].split()) < MIN_PREFERRED_WORDS
-                and len(combined[-1].split()) + words <= MAX_CHUNK_WORDS
-                and is_dialogue(combined[-1]) == is_dialogue(sentence)):
-                combined[-1] += ' ' + sentence
-            elif (combined and words <= 3
-                  and len(combined[-1].split()) + words <= TARGET_WORDS
-                  and is_dialogue(combined[-1]) == is_dialogue(sentence)):
-                combined[-1] += ' ' + sentence
-            else:
-                combined.append(sentence)
-        units = []
-        for sentence in combined:
-            units.extend(split_long(sentence))
-        for index, unit in enumerate(units):
-            if index == len(units) - 1:
-                boundary = 'scene' if is_heading else 'paragraph'
-            else:
-                stripped = unit.rstrip().rstrip('"”’\'').rstrip()
-                boundary = 'comma' if stripped.endswith((',', ';', ':', '—', '–')) else 'sentence'
-            output.append(Chunk(unit, boundary, is_dialogue(unit)))
-    if output:
-        output[-1].boundary = 'end'
-    return output
 
 
 def delivery_settings(text: str) -> tuple[float, float]:
@@ -407,90 +350,10 @@ def edge_silence(wav: torch.Tensor, sr: int, at_end: bool) -> float:
     return ((n - 1 - int(active[-1])) if at_end else int(active[0])) / sr
 
 
-def target_pause(cur: Chunk, nxt: Chunk) -> float:
-    """Distinguish intra-sentence boundaries from actual sentence/paragraph ends."""
-    pauses = {'comma': FINAL_COMMA_PAUSE, 'sentence': FINAL_SENTENCE_PAUSE,
-              'paragraph': FINAL_PARAGRAPH_PAUSE, 'scene': FINAL_SCENE_PAUSE}
-    target = pauses.get(cur.boundary, FINAL_SENTENCE_PAUSE)
-    if cur.dialogue != nxt.dialogue or (cur.dialogue and nxt.dialogue and cur.boundary == 'paragraph'):
-        target = max(target, FINAL_DIALOGUE_PAUSE)
-    return target
 
 
-def assemble(chunks: list[Chunk], recordings: list[torch.Tensor], sr: int) -> tuple[torch.Tensor, float]:
-    """Preserve raw onsets/endings; insert only missing silence between chunks."""
-    parts = []
-    added = 0.0
-    for i, (chunk, raw) in enumerate(zip(chunks, recordings)):
-        wav = clean_tensor(raw)
-        if i == 0:
-            lead = max(0, LEADING_PAD_FINAL * SPEED - edge_silence(wav, sr, False))
-            if lead > 0:
-                parts.append(torch.zeros((wav.shape[0], round(lead * sr))))
-        parts.append(wav)  # Absolutely no trim or fade: isolate onset-quality issues.
-        if i + 1 < len(chunks):
-            desired = target_pause(chunk, chunks[i+1]) * SPEED
-            existing = edge_silence(wav, sr, True) + edge_silence(recordings[i+1], sr, False)
-            extra = max(0, desired - existing)
-            if extra > 0:
-                parts.append(torch.zeros((wav.shape[0], round(extra * sr))))
-                added += extra
-    audio = torch.cat(parts, -1)
-    peak = float(audio.abs().max())
-    if peak > MAX_PEAK:
-        audio = audio * (MAX_PEAK / peak)
-        print(f'Peak attenuation: {peak:.3f} -> {MAX_PEAK:.3f}')
-    return audio, added
 
 
-def main():
-    """Parse command-line arguments and dispatch the requested operation."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--list-chunks', action='store_true', help='Preview chunk IDs and text without loading Chatterbox')
-    parser.add_argument('--regen', default='', help='Comma-separated 1-based chunk numbers to regenerate')
-    args = parser.parse_args()
-    if not TEXT_FILE.is_file() or not VOICE_FILE.is_file():
-        raise FileNotFoundError(f'Check these paths:\n{TEXT_FILE}\n{VOICE_FILE}')
-    text = TEXT_FILE.read_text(encoding='utf-8-sig').strip()
-    chunks = make_chunks(text)
-    if args.list_chunks:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        write_manifest(chunks)
-        for i, c in enumerate(chunks, 1):
-            print(f'{i:03d} [{c.boundary:9s}] {c.text}')
-        print(f'\nTotal: {len(chunks)} chunks')
-        return
-    if operation_busy():
-        raise RuntimeError('Cache Manager is scanning or cleaning. Wait before running V7.')
-    regen = {int(x) for x in args.regen.split(',') if x.strip()}
-    if any(n < 1 or n > len(chunks) for n in regen):
-        parser.error(f'--regen must use chunk numbers 1 to {len(chunks)}')
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    write_manifest(chunks)
-    print(f'Readable chunk index: {MANIFEST}')
-    print(f'Audio shortcuts: {READABLE_DIR}')
-    print(f'Device: {DEVICE} | Words: {len(text.split())} | Chunks: {len(chunks)} | Speed: {SPEED}x')
-    for index in sorted(regen):
-        path = CACHE_DIR / f'{cache_key(chunks[index-1].text)}.wav'
-        if path.is_file():
-            path.unlink()
-            print(f'Cleared chunk {index} from cache')
-    started = time.monotonic()
-    model = load_chatterbox(DEVICE)
-    recordings = []
-    for i, chunk in enumerate(chunks, 1):
-        print(f'\nChunk {i}/{len(chunks)}: {chunk.text[:120]}')
-        recordings.append(generate_cached(model, chunk.text, model.sr))
-        link_chunk(i, chunk)
-    audio, silence_added = assemble(chunks, recordings, model.sr)
-    ta.save(str(NORMAL_OUTPUT), audio, model.sr)
-    print('\nNarration complete!')
-    print(f'Normal-speed WAV: {NORMAL_OUTPUT}')
-    print(f'Added silence (pre-speed): {silence_added:.1f}s')
-    print(f'Normal duration: {audio.shape[-1]/model.sr/60:.2f} min')
-    print(f'Processing time: {(time.monotonic()-started)/60:.2f} min')
 
 
 # ---------------- V7: smooth, VRAM-safe narration ----------------
@@ -650,6 +513,55 @@ def assemble(chunks: list[Chunk], recordings: list[torch.Tensor], sr: int) -> tu
         print(f'Peak attenuation: {peak:.3f} -> {MAX_PEAK:.3f}')
     return audio, added
 
+
+def main():
+    """Parse command-line arguments and dispatch the requested operation."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--list-chunks', action='store_true', help='Preview chunk IDs and text without loading Chatterbox')
+    parser.add_argument('--regen', default='', help='Comma-separated 1-based chunk numbers to regenerate')
+    args = parser.parse_args()
+    if not TEXT_FILE.is_file() or not VOICE_FILE.is_file():
+        raise FileNotFoundError(f'Check these paths:\n{TEXT_FILE}\n{VOICE_FILE}')
+    text = TEXT_FILE.read_text(encoding='utf-8-sig').strip()
+    chunks = make_chunks(text)
+    if args.list_chunks:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        write_manifest(chunks)
+        for i, c in enumerate(chunks, 1):
+            print(f'{i:03d} [{c.boundary:9s}] {c.text}')
+        print(f'\nTotal: {len(chunks)} chunks')
+        return
+    if operation_busy():
+        raise RuntimeError('Cache Manager is scanning or cleaning. Wait before running V7.')
+    regen = {int(x) for x in args.regen.split(',') if x.strip()}
+    if any(n < 1 or n > len(chunks) for n in regen):
+        parser.error(f'--regen must use chunk numbers 1 to {len(chunks)}')
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    write_manifest(chunks)
+    print(f'Readable chunk index: {MANIFEST}')
+    print(f'Audio shortcuts: {READABLE_DIR}')
+    print(f'Device: {DEVICE} | Words: {len(text.split())} | Chunks: {len(chunks)} | Speed: {SPEED}x')
+    for index in sorted(regen):
+        path = CACHE_DIR / f'{cache_key(chunks[index-1].text)}.wav'
+        if path.is_file():
+            path.unlink()
+            print(f'Cleared chunk {index} from cache')
+    started = time.monotonic()
+    model = load_chatterbox(DEVICE)
+    recordings = []
+    for i, chunk in enumerate(chunks, 1):
+        print(f'\nChunk {i}/{len(chunks)}: {chunk.text[:120]}')
+        recordings.append(generate_cached(model, chunk.text, model.sr))
+        link_chunk(i, chunk)
+    audio, silence_added = assemble(chunks, recordings, model.sr)
+    ta.save(str(NORMAL_OUTPUT), audio, model.sr)
+    print('\nNarration complete!')
+    print(f'Normal-speed WAV: {NORMAL_OUTPUT}')
+    print(f'Added silence (pre-speed): {silence_added:.1f}s')
+    print(f'Normal duration: {audio.shape[-1]/model.sr/60:.2f} min')
+    print(f'Processing time: {(time.monotonic()-started)/60:.2f} min')
 
 if __name__ == '__main__':
     main()

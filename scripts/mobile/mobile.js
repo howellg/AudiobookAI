@@ -63,9 +63,13 @@ function displayStatus(data) {
     if(data.books.some(b=>String(b.id)===currentBook))bookSelect.value=currentBook;
   }
   const narrator=$('voice'), old=narrator.value;
-  narrator.replaceChildren();
-  data.voices.forEach(v=>{let o=text('option',v.name);o.value=v.id;narrator.append(o);});
-  if(data.voices.some(v=>v.id===old))narrator.value=old;
+  const wantedVoices=data.voices.map(v=>v.id+'|'+v.name).join('\n');
+  if(narrator.dataset.options!==wantedVoices){
+    narrator.replaceChildren();
+    data.voices.forEach(v=>{let o=text('option',v.name);o.value=v.id;narrator.append(o);});
+    narrator.dataset.options=wantedVoices;
+    if(data.voices.some(v=>v.id===old))narrator.value=old;
+  }
 }
 async function refresh() {
   if (!key) {setConnected(false);return;}

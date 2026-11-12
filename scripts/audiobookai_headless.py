@@ -50,12 +50,21 @@ def active_converter_pids():
     for item in proc_root.iterdir():
         if not item.name.isdecimal():
             continue
+        if int(item.name) == os.getpid():
+            continue
         try:
-            args = (item / "cmdline").read_bytes().replace(b"\x00", b" ")
+            args = [arg.decode('utf-8', 'replace') for arg in
+                    (item / 'cmdline').read_bytes().split(b'\x00') if arg]
         except (OSError, PermissionError):
             continue
-        if (b"epub_to_audiobook_v7_studio.py" in args
-                and (b" convert " in args or b" resume " in args)):
+        if (not args or not Path(args[0]).name.startswith(('python', 'pypy'))):
+            continue
+        offset = 1
+        while offset < len(args) and args[offset] in ('-u', '-B', '-E', '-I', '-s', '-S', '-O', '-OO'):
+            offset += 1
+        if (offset < len(args)
+                and Path(args[offset]).name == 'epub_to_audiobook_v7_studio.py'
+                and any(cmd in args[offset + 1:] for cmd in ('convert', 'resume'))):
             pids.append(int(item.name))
     return sorted(pids)
 
@@ -287,8 +296,20 @@ def main(argv=None):
     parser.add_argument("--verbose", action="store_true",
                         help="Also print cached-chunk chatter to the terminal")
     args = parser.parse_args(argv)
-    # Stop before Store initialization because its recovery migration changes
-    # running statuses; never make it think another process died while alive.
+    if not DB_PATH.is_file():
+        raise FileNotFoundError(f"Existing Studio queue database not found: {DB_PATH}")
+    if args.list:
+        # Inspections must never modify the status of a live GUI job.
+        store = Store(DB_PATH, recover_stale=False)
+        try:
+            for row in store.jobs():
+                print(f"#{row['id']:>4} [{row['status']:<11}] "
+                      f"{row['book_title']} — {row['name']} "
+                      f"({row['completed_chunks']}/{row['total_chunks']} chunks)")
+            return 0
+        finally:
+            store.close()
+    # Execution must reserve the headless singleton before recovering jobs.
     lock = reserve_runner()
     try:
         alive = active_converter_pids()
@@ -296,16 +317,8 @@ def main(argv=None):
             raise RuntimeError(
                 f"Converter process(es) still active: {alive}. "
                 "Do not start another conversion or open the GUI simultaneously.")
-        if not DB_PATH.is_file():
-            raise FileNotFoundError(f"Existing Studio queue database not found: {DB_PATH}")
         store = Store(DB_PATH)
         try:
-            if args.list:
-                for row in reversed(store.jobs()):
-                    print(f"#{row['id']:>4} [{row['status']:<11}] "
-                          f"{row['book_title']} — {row['name']} "
-                          f"({row['completed_chunks']}/{row['total_chunks']} chunks)")
-                return 0
             return run_job(store, args.job, verbose=args.verbose)
         finally:
             store.close()

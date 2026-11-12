@@ -245,6 +245,26 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.14.2: Reliability and external bug-audit fixes
+
+Metadata backup controls are restored to **Settings → Metadata backups**,
+including Backup now, Verify latest, and Open backups folder. Automatic
+backup remains best-effort before a conversion and no longer aborts a
+job merely because a label was removed.
+
+Studio is now single-instance per repository output folder. If a copy
+is already open or a standalone converter is running, close or wait for
+the existing process instead of launching a second one. The headless
+runner's **--list** mode can inspect an active queue without marking
+its running jobs interrupted. If Studio is presently generating audio,
+wait until conversion is idle before restarting to load this release.
+
+Expressive-mode narrator archives, persistent part receipts in the
+chunk editor, per-mode part numbering/selection, read-along and
+pronunciation handling, reviewed QC issues, mobile dashboard timeouts
+and cache-index reconstruction have also been corrected. No cache
+purge, automatic TTS regeneration or model reinstall is necessary.
+
 ### V2.14.1: Continue through all queued parts
 
 On the desktop **Queue** page, choose **Start queue** to run through

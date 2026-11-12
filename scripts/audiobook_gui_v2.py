@@ -23,6 +23,7 @@ import secrets
 import urllib.parse
 import zipfile
 import json
+import fcntl
 import re
 import sys
 import time
@@ -246,7 +247,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.14.1')
+        self.setWindowTitle('AudiobookAI Studio — V2.14.2')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -339,6 +340,7 @@ class Studio(QMainWindow):
         self.auto_quality_failed = 0
         self.auto_quality_cancelled = False
         self.auto_quality_restart_queue = False
+        self.auto_quality_restart_selected = None
 
         main = QWidget()
         self.setCentralWidget(main)
@@ -353,7 +355,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.14.1 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.14.2 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -413,8 +415,8 @@ class Studio(QMainWindow):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(callback)
             self.shortcuts.append(shortcut)
-        for i in range(len(self.nav)):
-            shortcut = QShortcut(QKeySequence(f'Alt+{i+1}'), self)
+        for i in range(min(len(self.nav), 10)):
+            shortcut = QShortcut(QKeySequence(f'Alt+{(i+1)%10}'), self)
             shortcut.activated.connect(lambda idx=i: self.change_page(idx))
             self.shortcuts.append(shortcut)
         # A single 500ms timer refreshes elapsed time and batch-renders logs.
@@ -1593,10 +1595,24 @@ class Studio(QMainWindow):
                 QTimer.singleShot(150, self.quality_next_automatic)
         elif self.auto_quality_pending:
             QTimer.singleShot(150, self.quality_next_automatic)
-        if self.auto_quality_restart_queue:
+        if self.auto_quality_restart_selected is not None:
+            job_id, single_part = self.auto_quality_restart_selected
+            QTimer.singleShot(
+                150, lambda: self.resume_selected_after_quality(job_id, single_part))
+        elif self.auto_quality_restart_queue:
             self.auto_quality_restart_queue = False
             if self.run_queue:
                 QTimer.singleShot(150, self.continue_queue_if_requested)
+
+    def resume_selected_after_quality(self, job_id, single_part):
+        # Pause/Stop during the timer gap must cancel the deferred launch.
+        if self.auto_quality_restart_selected != (job_id, single_part):
+            return
+        self.auto_quality_restart_selected = None
+        job = self.store.job(job_id)
+        if job is not None and job['status'] == 'queued' and self.proc is None:
+            self.run_queue = not single_part
+            self.start_job(job_id)
 
     def stop_quality(self):
         """Stop only the independent scanner, leaving all audio and jobs intact."""
@@ -2050,6 +2066,8 @@ class Studio(QMainWindow):
                     '--indices', ','.join(map(str, indices)), '--destination', str(target)]
             if group['voice_path']:
                 args += ['--voice', str(group['voice_path'])]
+            if group.get('acting_mode', 'standard') != 'standard':
+                args += ['--acting-mode', group['acting_mode']]
             for key in ('title', 'author', 'series', 'volume', 'narrator'):
                 args += [f'--{key}', details[key]]
             if details['cover']:
@@ -2408,7 +2426,9 @@ class Studio(QMainWindow):
         highlight.cursor.select(QTextCursor.BlockUnderCursor)
         highlight.format.setBackground(QColor(80, 145, 205, 90))
         self.reader_text.setExtraSelections([highlight])
-        self.reader_text.setTextCursor(highlight.cursor)
+        cursor = QTextCursor(highlight.cursor)
+        cursor.clearSelection()
+        self.reader_text.setTextCursor(cursor)
         self.reader_text.ensureCursorVisible()
     def reader_seek_chunk(self, block):
         """Click a narration chunk to seek to its approximate beginning."""
@@ -2424,6 +2444,7 @@ class Studio(QMainWindow):
                 and event.type() == QEvent.MouseButtonRelease):
             block = self.reader_text.cursorForPosition(event.position().toPoint()).blockNumber()
             self.reader_seek_chunk(block)
+            return True
         return super().eventFilter(obj, event)
 
     def reader_open_editor(self):
@@ -2649,6 +2670,25 @@ class Studio(QMainWindow):
         storage.addWidget(mk_button('Calculate cache', self.calculate_cache_size))
         storage.addWidget(mk_button('Open cache folder', self.open_cache_folder))
         l.addLayout(storage)
+        l.addWidget(title_label('Metadata backups · local recovery', 14))
+        backup_intro = QLabel(
+            'Back up SQLite queue/history, pronunciation rules, and other small '
+            'metadata without copying generated audio. Automatic backups run '
+            'before generation when the latest one is older than 30 minutes.')
+        backup_intro.setWordWrap(True)
+        backup_intro.setObjectName('muted')
+        l.addWidget(backup_intro)
+        self.backup_status = QLabel('No backup checked yet.')
+        self.backup_status.setWordWrap(True)
+        self.backup_status.setObjectName('muted')
+        l.addWidget(self.backup_status)
+        backup_actions = QHBoxLayout()
+        backup_actions.addWidget(mk_button('Backup metadata now', self.backup_metadata_now))
+        backup_actions.addWidget(mk_button('Verify latest backup', self.verify_latest_metadata_backup))
+        backup_actions.addWidget(mk_button('Open backups folder', self.open_metadata_backup_folder))
+        backup_actions.addStretch()
+        l.addLayout(backup_actions)
+
         l.addWidget(title_label('Intelligent raw cache manager · safe preview first', 14))
         cache_tip = QLabel(
             'The cache catalog records narrator, voice settings, dialogue/prose and '
@@ -3342,7 +3382,8 @@ class Studio(QMainWindow):
         voice_id = str(fixed_voice) if fixed_voice is not None else None
         acting_mode = 'expressive' if self.acting_checkbox.isChecked() else 'standard'
         folder = self.converter.book_folder(Path(book['path']), fixed_voice, acting_mode)
-        next_part = self.store.next_part_number(self.current_book_id, voice_id, folder)
+        next_part = self.store.next_part_number(
+            self.current_book_id, voice_id, folder, acting_mode=acting_mode)
         for i, numbers in enumerate(parts, next_part):
             span = f'{numbers[0]}-{numbers[-1]}' if len(numbers) > 1 else str(numbers[0])
             name = f'Part {i} · sections {span}'
@@ -3508,10 +3549,12 @@ class Studio(QMainWindow):
                 self.store.db, ROOT / 'output', self.backup_dir,
                 read_config(), automatic=True, keep=10)
             self.write_log(f'Automatic metadata backup verified: {path.name}')
-            self.backup_status.setText(f'Latest automatic backup: {path.name}')
+            if hasattr(self, 'backup_status'):
+                self.backup_status.setText(f'Latest automatic backup: {path.name}')
         except Exception as exc:
             self.write_log(f'Metadata backup failed (narration unaffected): {exc}')
-            self.backup_status.setText(f'Backup error: {exc}')
+            if hasattr(self, 'backup_status'):
+                self.backup_status.setText(f'Backup error: {exc}')
 
     def backup_metadata_now(self):
         """Manually save a metadata backup excluded from automatic pruning."""
@@ -3706,7 +3749,7 @@ class Studio(QMainWindow):
         voices.extend({'id': str(path.relative_to(VOICE_DIR.resolve())),
                        'name': path.stem} for path in voice_choices())
         return {
-            'version': '2.11.0', 'run_queue': bool(self.run_queue),
+            'version': '2.14.2', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -3770,7 +3813,10 @@ class Studio(QMainWindow):
         if not sections:
             raise ValueError('Book sections are missing; open it in Generate first.')
         available = [row['section_index'] for row in sections]
-        already = self.store.claimed_sections(book_id)
+        fixed_voice = freeze_voice(voice)
+        voice_identity = str(fixed_voice) if fixed_voice else ''
+        already = self.store.claimed_sections(
+            book_id, voice_path=voice_identity, acting_mode=mode)
         if payload.get('all_unqueued') is True:
             story = [row['section_index'] for row in sections
                      if STORY_RE.match(row['title'])]
@@ -3791,12 +3837,11 @@ class Studio(QMainWindow):
         if len(parts) > 75:
             raise ValueError('Too many parts in one request. Choose a shorter section range.')
         self.converter = self.converter or load_converter()
-        fixed_voice = freeze_voice(voice)
-        voice_identity = str(fixed_voice) if fixed_voice else None
         folder = self.converter.book_folder(Path(book['path']), fixed_voice, mode)
         existing = self.store.jobs()
         occupied = {row['output_name'] for row in existing if row['book_id'] == book_id}
-        number = self.store.next_part_number(book_id, voice_identity, folder)
+        number = self.store.next_part_number(
+            book_id, voice_identity, folder, acting_mode=mode)
         created = []
         try:
             for i, indices in enumerate(parts, start=number):
@@ -4065,6 +4110,17 @@ class Studio(QMainWindow):
             return
         self.clear_storage_wait()
         self.run_queue = not single_part
+        if getattr(self, 'auto_quality_scanning', False) and self.quality_proc is not None:
+            self.auto_quality_restart_selected = (job_id, single_part)
+            self.stop_quality()
+            Studio.show_queue_mode(self,
+                'Ending automatic quality scan before starting selected narration.')
+            return
+        if self.quality_proc is not None:
+            self.run_queue = False
+            QMessageBox.information(self, 'Manual quality scan running',
+                'Finish or stop the manual quality scan before starting a selected part.')
+            return
         if single_part:
             Studio.show_queue_mode(self, 'ONE part only — automatic continuation is disabled.')
             self.write_log('Single-part generation selected. The queue will pause after this part.')
@@ -4084,6 +4140,7 @@ class Studio(QMainWindow):
 
     def pause_after_part(self):
         """Stop automatic queue advancement after the active M4B finishes."""
+        self.auto_quality_restart_selected = None
         self.clear_storage_wait()
         self.run_queue = False
         Studio.show_queue_mode(self, 'Queue paused — current part will finish; next part will not start.')
@@ -4346,6 +4403,7 @@ class Studio(QMainWindow):
 
     def stop_job(self):
         """Request an orderly stop that retains previously completed chunk audio."""
+        self.auto_quality_restart_selected = None
         self.clear_storage_wait()
         self.run_queue = False
         Studio.show_queue_mode(self, 'Queue stopped — click Start queue to resume remaining parts.')
@@ -4997,17 +5055,40 @@ class Studio(QMainWindow):
         row = self.review_table.currentRow()
         obj = self.review_table.item(row, 0) if row >= 0 else None
         wav = Path(obj.data(Qt.UserRole)) if obj is not None else None
-        folder = wav.parent if wav is not None and wav.is_file() else self.converter.book_folder(Path(book['path']))
+        folder = (wav.parent.parent if wav is not None and wav.is_file()
+                  and wav.parent.name == 'chapters'
+                  else self.converter.book_folder(Path(book['path'])))
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def completed_jobs_for_editor(self, book_id, folder):
+        """Include saved receipts after completed rows are cleared from the queue.
+
+        Only exports belonging to this narrator and acting-mode folder can be
+        re-encoded when its chapter WAV changes.
+        """
+        folder = Path(folder).resolve()
+        result = {}
+        for record in list(self.store.jobs()) + list(self.store.completed_parts(book_id)):
+            job = dict(record)
+            if job['book_id'] != book_id:
+                continue
+            if job.get('status', 'complete') != 'complete':
+                continue
+            raw = job.get('output_path')
+            if not raw:
+                continue
+            path = Path(raw).resolve()
+            if path.parent != folder or not path.is_file():
+                continue
+            job['output_name'] = job.get('output_name') or path.stem
+            job['status'] = 'complete'
+            result[str(path)] = job
+        return list(result.values())
 
     def open_chunk_editor(self):
         """Open chunk-level take review for the selected completed chapter."""
         existing = getattr(self, 'editor_dialog', None)
-        if existing is not None and existing.isVisible():
-            existing.raise_()
-            existing.activateWindow()
-            return
         if self.proc is not None:
             QMessageBox.information(self, 'Conversion in progress',
                 'Finish or pause the current conversion before editing chapter WAVs. '
@@ -5029,6 +5110,16 @@ class Studio(QMainWindow):
             return
         folder = path.parent.parent
         chapter = int(path.stem)
+        if existing is not None and existing.isVisible():
+            if existing.folder.resolve() == folder.resolve() and existing.chapter == chapter:
+                existing.raise_()
+                existing.activateWindow()
+                return
+            if existing.proc is not None:
+                QMessageBox.information(self, 'Chunk editor busy',
+                    'Finish the current chapter edit before opening a different chapter.')
+                return
+            existing.close()
         manifest_path = folder / 'manifest.json'
         try:
             manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
@@ -5036,8 +5127,7 @@ class Studio(QMainWindow):
             self.error('No chapter manifest found', exc)
             return
         voice = manifest.get('voice_path')
-        jobs = [dict(job) for job in self.store.jobs()
-                if job['book_id'] == book_id and job['status'] == 'complete']
+        jobs = self.completed_jobs_for_editor(book_id, folder)
         self.editor_dialog = ChunkEditor(book['path'], folder, chapter, voice, jobs, self)
         if getattr(self, 'reader_active_identity', None) is not None:
             self.reader_save_progress()
@@ -5326,6 +5416,26 @@ def main():
         return 2
     # `palette(mid)` is nearly invisible on some KDE dark themes. Mix the
     # foreground with the window color for accessible secondary text.
+    # Hold the singleton lock before Store() performs startup recovery.
+    # Opening a second Studio must not rewrite a running job's status.
+    lock_path = ROOT / 'output' / '.studio_instance.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    gui_lock = lock_path.open('a+')
+    try:
+        fcntl.flock(gui_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        gui_lock.close()
+        QMessageBox.warning(None, 'AudiobookAI already running',
+            'Another Studio instance owns the queue. Switch to its window '
+            'instead of starting a second instance.')
+        return 2
+    from audiobookai_headless import active_converter_pids
+    if active_converter_pids():
+        gui_lock.close()
+        QMessageBox.warning(None, 'Converter already active',
+            'An external converter is running. Wait until it finishes '
+            'before opening Studio; its queue state must stay unchanged.')
+        return 2
     foreground = app.palette().color(QPalette.WindowText)
     background = app.palette().color(QPalette.Window)
     muted = [round(getattr(foreground, c)() * .80 + getattr(background, c)() * .20)
@@ -5337,8 +5447,11 @@ def main():
         path = Path(sys.argv[1]).expanduser()
         if path.is_file() and path.suffix.lower() == '.epub':
             QTimer.singleShot(0, lambda: window.import_book(path))
-    sys.exit(app.exec())
+    result = app.exec()
+    fcntl.flock(gui_lock, fcntl.LOCK_UN)
+    gui_lock.close()
+    return result
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

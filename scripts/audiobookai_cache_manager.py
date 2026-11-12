@@ -71,7 +71,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
  modes=entries.modes | excluded.modes,
  size=excluded.size,mtime_ns=excluded.mtime_ns,device=excluded.device,inode=excluded.inode,
- last_seen=excluded.last_seen,
+ last_seen=MAX(entries.last_seen, excluded.last_seen),
  source=CASE WHEN excluded.source='engine' THEN 'engine' ELSE entries.source END,
  voice_path=excluded.voice_path, voice_size=excluded.voice_size,
  voice_mtime_ns=excluded.voice_mtime_ns, text_sha=excluded.text_sha,
@@ -216,18 +216,26 @@ def _index_records(output, cache_names, cache_path):
                 continue
             name = rawpath.name
             protected.add(name)
-            if name not in cache_names or voice_stat is None or name in validated:
+            if name not in cache_names or voice_stat is None:
                 continue
             text = entry.get('text')
             if not isinstance(text, str) or not text:
                 continue
-            dialogue = text.lstrip().startswith(('"', '“', '‘'))
+            dialogue = (entry['dialogue'] if type(entry.get('dialogue')) is bool
+                        else text.lstrip().startswith(('"', '“', '‘')))
             ex, cfg = _delivery(mode, dialogue)
             if key_for(text, voice, voice_stat.st_size, voice_stat.st_mtime_ns, ex, cfg) != name:
                 continue
             st = cache_names[name]
-            validated[name] = _item(Path(cache_path) / name, st, text, voice,
-                                    voice_stat, mode, dialogue, 'index')
+            record = _item(Path(cache_path) / name, st, text, voice,
+                           voice_stat, mode, dialogue, 'index')
+            if name in validated:
+                previous = validated[name]
+                if (previous[1:7], previous[7], previous[9:13]) != (
+                        record[1:7], record[7], record[9:13]):
+                    continue
+                record = record[:8] + (record[8] | previous[8],) + record[9:]
+            validated[name] = record
     return protected, validated, count
 
 
@@ -241,10 +249,22 @@ def _active_conversion():
         except (OSError, PermissionError):
             continue
         args = [x.decode('utf-8','replace') for x in raw if x]
-        if not args: continue
-        main = [Path(arg).name for arg in args if arg.endswith('.py')]
-        if {'epub_to_audiobook_v7_studio.py', 'audiobookai_headless.py',
-            'test_five_minutes_v7_smooth.py'} & set(main):
+        if (not args or int(proc.name) == os.getpid()
+                or not Path(args[0]).name.startswith(('python', 'pypy'))):
+            continue
+        offset = 1
+        while offset < len(args) and args[offset] in ('-u', '-B', '-E', '-I', '-s', '-S', '-O', '-OO'):
+            offset += 1
+        if offset >= len(args):
+            continue
+        script = Path(args[offset]).name
+        if script == 'epub_to_audiobook_v7_studio.py' and (
+                'convert' in args[offset + 1:] or 'resume' in args[offset + 1:]):
+            return True
+        if script == 'audiobookai_headless.py' and '--job' in args[offset + 1:]:
+            return True
+        if script == 'test_five_minutes_v7_smooth.py' and (
+                '--list-chunks' not in args[offset + 1:]):
             return True
     return False
 
@@ -343,7 +363,7 @@ def inventory(*, cache=CACHE, output=OUTPUT, catalog=CATALOG,
     if progress: progress(f'Protected {len(refs):,} names from {indexes:,} chapter indexes')
     with _db(catalog) as db:
         for row in backfill.values():
-            db.execute('INSERT OR IGNORE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', row)
+            db.execute(UPSERT, row)
         records = {row[0]: row for row in db.execute('SELECT * FROM entries')}
     candidates = []
     by_profile = defaultdict(lambda: [0,0])

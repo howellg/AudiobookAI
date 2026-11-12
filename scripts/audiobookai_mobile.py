@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import queue
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 
 STATIC_DIR = Path(__file__).resolve().parent / 'mobile'
 MAX_JSON = 48 * 1024
@@ -39,24 +39,42 @@ class MobileBridge:
     def __init__(self):
         self.pending: queue.Queue[MobileRequest] = queue.Queue(maxsize=32)
 
-    def call(self, operation, payload):
+    def call(self, operation, payload, *, timeout=None):
         request = MobileRequest(operation, payload)
         try:
             self.pending.put_nowait(request)
         except queue.Full as exc:
             raise RuntimeError('Mobile controller busy; retry shortly.') from exc
-        if not request.completed.wait(timeout=45 if operation in ('upload', 'add') else 15):
-            # If Qt is still busy with another task, prevent a stale queued
-            # command from executing after the caller has already timed out.
+        limit = timeout if timeout is not None else (45 if operation in ('upload', 'add') else 15)
+        if not request.completed.wait(timeout=limit):
+            # A queued request can be cancelled safely before Qt executes it.
+            # Once processing has begun, wait for its actual result instead of
+            # returning an ambiguous failure that invites duplicate uploads.
             with request.lock:
-                if not request.processing:
+                started = request.processing
+                if not started:
                     request.cancelled = True
-            raise RuntimeError(
-                'Studio timed out. The operation may still be finishing; '
-                'refresh the queue before trying again.')
+                    request.completed.set()
+            if started:
+                request.completed.wait()
+            else:
+                raise RuntimeError('Studio busy: request was cancelled before execution; retry safely.')
         if request.error:
             raise ValueError(request.error)
         return request.result
+
+    def cancel_pending(self):
+        """Unblock queued dashboard calls before shutting down its HTTP server."""
+        while True:
+            try:
+                request = self.pending.get_nowait()
+            except queue.Empty:
+                return
+            with request.lock:
+                if not request.processing:
+                    request.cancelled = True
+                    request.error = 'Dashboard stopped before this request started.'
+                    request.completed.set()
 
     def process(self, callback, maximum=12):
         """Must run on the Qt GUI thread, never from an HTTP thread."""
@@ -128,9 +146,20 @@ class MobileHTTPServer:
                     return True  # CLI clients still need the bearer key.
                 try:
                     origin_parsed = urlsplit(origin)
-                    return (origin_parsed.scheme in ('https', 'http')
-                            and origin_parsed.netloc.lower() ==
-                            self.headers.get('Host', '').lower())
+                    if origin_parsed.scheme not in ('https', 'http'):
+                        return False
+                    requested = origin_parsed.netloc.lower()
+                    host = self.headers.get('Host', '').lower()
+                    if requested == host:
+                        return True
+                    # Tailscale/reverse proxies may rewrite Host to loopback.
+                    # Accept their external host only when the request was
+                    # delivered to the loopback listener by a local proxy.
+                    forwarded = self.headers.get('X-Forwarded-Host', '').lower()
+                    return (self.client_address[0] in ('127.0.0.1', '::1')
+                            and host in (f'127.0.0.1:{owner.port}',
+                                         f'localhost:{owner.port}')
+                            and forwarded == requested and ',' not in forwarded)
                 except ValueError:
                     return False
 
@@ -198,6 +227,11 @@ class MobileHTTPServer:
                                 ('application/epub+zip', 'application/octet-stream')):
                             raise ValueError('Upload must be an EPUB file')
                         name = self.headers.get('X-Filename', '')
+                        decoded = unquote(name)
+                        if (not decoded or len(decoded) > 190
+                                or any(c in decoded for c in ('/', '\\', '\x00'))
+                                or not decoded.lower().endswith('.epub')):
+                            raise ValueError('Invalid EPUB filename.')
                         result = owner.bridge.call('upload', {'filename': name, 'content': data})
                     else:
                         if not self.headers.get('Content-Type', '').startswith('application/json'):
@@ -226,6 +260,9 @@ class MobileHTTPServer:
         self.thread.start()
 
     def stop(self):
+        cancel = getattr(self.bridge, 'cancel_pending', None)
+        if callable(cancel):
+            cancel()
         self.server.shutdown()
         self.server.server_close()
         if self.thread.is_alive():
