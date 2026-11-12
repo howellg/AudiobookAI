@@ -199,7 +199,7 @@ def needs_complete_export(folder: Path, name: str, indices: list[int]) -> bool:
 
 def make_archive(epub: Path, folder: Path, indices: list[int], voice: Path | None,
                  destination: Path, details: dict, cover: Path | None = None,
-                 acting_mode: str = 'standard') -> Path:
+                 acting_mode: str = 'standard', *, fresh_source=False) -> Path:
     """Refresh a complete edition from WAVs, then package it for long-term storage."""
     # Imports are cheap; GPU engine loading in the converter remains lazy.
     import epub_to_audiobook_v7_studio as converter
@@ -213,18 +213,10 @@ def make_archive(epub: Path, folder: Path, indices: list[int], voice: Path | Non
     expected_folder = converter.book_folder(epub, voice, acting_mode)
     if expected_folder.resolve() != folder.resolve():
         raise ValueError('Narrator output folder mismatch')
-    title, _author, _sections = converter.load_epub(epub)
+    title, author, sections = converter.load_epub(epub)
     name = converter.safe_name(title, 100) + '_COMPLETE'
-    if needs_complete_export(folder, name, indices):
-        command = [sys.executable, str(converter.__file__), 'export', str(epub),
-                   '--chapters', ','.join(str(i) for i in indices), '--output-name', name]
-        if voice:
-            command += ['--voice', str(voice)]
-        if acting_mode != 'standard':
-            command += ['--acting-mode', acting_mode]
-        print('Updating complete audiobook from saved WAVs…', flush=True)
-        subprocess.run(command, check=True)
-    full = folder / f'{name}.m4b'
+    # Finish Book may select a different section set from a prior complete
+    # export. Use a private intermediate so neither edition replaces the other.
     with tempfile.TemporaryDirectory(prefix='audiobook-cover-') as work:
         actual_cover = cover
         if not actual_cover:
@@ -233,8 +225,25 @@ def make_archive(epub: Path, folder: Path, indices: list[int], voice: Path | Non
                 payload, ext = embedded
                 actual_cover = Path(work) / ('cover' + ext)
                 actual_cover.write_bytes(payload)
-        print('Packaging archival M4B with metadata and cover…', flush=True)
-        archive_copy(full, destination, details, actual_cover)
+        if fresh_source:
+            with tempfile.TemporaryDirectory(prefix='.finish-book-', dir=folder) as staging:
+                print('Encoding Finish Book coverage from saved WAVs…', flush=True)
+                full = converter.export_m4b(epub, title, author, sections, indices, folder, name,
+                                            verify_complete=True, staging_dir=Path(staging))
+                archive_copy(full, destination, details, actual_cover)
+        else:
+            if needs_complete_export(folder, name, indices):
+                command = [sys.executable, str(converter.__file__), 'export', str(epub),
+                           '--chapters', ','.join(str(i) for i in indices), '--output-name', name]
+                if voice:
+                    command += ['--voice', str(voice)]
+                if acting_mode != 'standard':
+                    command += ['--acting-mode', acting_mode]
+                print('Updating complete audiobook from saved WAVs…', flush=True)
+                subprocess.run(command, check=True)
+            full = folder / f'{name}.m4b'
+            print('Packaging archival M4B with metadata and cover…', flush=True)
+            archive_copy(full, destination, details, actual_cover)
     details = dict(details, last_export=str(Path(destination).resolve()))
     save_edition(epub, folder, details)
     return Path(destination)
@@ -254,6 +263,7 @@ def main() -> None:
     parser.add_argument('--volume', default='')
     parser.add_argument('--narrator', default='')
     parser.add_argument('--cover', type=Path)
+    parser.add_argument('--fresh-source', action='store_true')
     args = parser.parse_args()
     indices = [int(v) for v in args.indices.split(',') if v.strip()]
     if not indices or len(indices) != len(set(indices)) or min(indices) < 1:
@@ -263,7 +273,7 @@ def main() -> None:
         details['cover'] = str(args.cover)
     result = make_archive(args.epub.resolve(), args.folder.resolve(), sorted(indices),
                           args.voice.resolve() if args.voice else None, args.destination, details,
-                          args.cover, args.acting_mode)
+                          args.cover, args.acting_mode, fresh_source=args.fresh_source)
     print(f'Archive ready: {result}', flush=True)
 
 

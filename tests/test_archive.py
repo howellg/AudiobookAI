@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import audiobookai_archive as arc
@@ -93,6 +94,32 @@ class ArchiveTests(unittest.TestCase):
             self.assertTrue(any(s.get('codec_type') == 'video' for s in result['streams']))
             self.assertEqual(next(s['codec_name'] for s in result['streams'] if s['codec_type'] == 'audio'), 'aac')
             self.assertTrue(source.exists())
+
+    def test_finish_book_archive_uses_exact_coverage_and_private_intermediate(self):
+        import epub_to_audiobook_v7_studio as converter
+
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            source = folder / 'Book_COMPLETE.m4b'
+            source.write_bytes(b'prior complete export')
+            (folder / 'chapters').mkdir()
+            (folder / 'manifest.json').write_text(json.dumps({
+                'chapters': {'2': {'samples': 24000, 'sample_rate': 24000}}}))
+            wav = folder / 'chapters' / '0002.wav'
+            subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                            'sine=frequency=440:duration=1', '-ar', '24000', str(wav)], check=True)
+            sections = [converter.Section(i, f'Chapter {i}', [], 'fixture.xhtml')
+                        for i in (1, 2)]
+            target = folder / 'archive.m4b'
+            with patch.object(converter, 'load_epub', return_value=('Book', 'Author', sections)), \
+                 patch.object(converter, 'book_folder', return_value=folder), \
+                 patch.object(arc, 'extract_epub_cover', return_value=None), \
+                 patch.object(arc, 'save_edition'):
+                arc.make_archive(folder / 'book.epub', folder, [2], None,
+                                 target, {'title': 'Archive'}, fresh_source=True)
+            self.assertEqual(source.read_bytes(), b'prior complete export')
+            self.assertEqual([c['tags']['title'] for c in arc._probe(target)['chapters']], ['Chapter 2'])
+            self.assertFalse(list(folder.glob('.finish-book-*')))
 
     def test_failed_archive_does_not_replace_existing_destination(self):
         with tempfile.TemporaryDirectory() as d:

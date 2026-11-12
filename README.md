@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.16.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.17.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.17.0 Finish Book:** Select a narrator edition to review chapter coverage, scan existing WAVs, and export a complete M4B. The exporter checks the audio stream, chapter-marker count, and duration before publishing the file. Open Archive from the same page to set edition metadata and cover art.
 - **V2.16.0 queue preflight:** Open **Queue → Check entire queue…** before an overnight run. Studio checks each pending part’s EPUB and section selection, narrator WAV, and required pronunciation snapshot. It checks cache storage and estimates additional WAV and M4B space per filesystem. The report is advisory and leaves the queue and files untouched.
 - **V2.15.1 chapter notifications:** Enable **Notify when a chapter finishes** in **Settings → Android notifications**. Studio sends a generic ntfy alert after saving a new chapter WAV, before the part export. Chapters already saved before a resumed run are skipped. The private queue timeline shows the chapter details.
 - **V2.15.0 queue activity:** Studio and the private mobile dashboard show recent converter launches, M4B exports, completions, handoffs, and pauses. Part exports show actual FFmpeg progress. Enable the optional stall alert in **Settings → Android notifications**. Activity covers the current Studio session.

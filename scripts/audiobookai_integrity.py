@@ -7,6 +7,7 @@ separate signals; none implies another has succeeded.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -87,25 +88,28 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
     compatible = len(rate_values) <= 1
     qc_path = folder / 'quality_reports' / 'summary.json'
     qc = 'Not scanned'
+    unresolved = None
     if qc_path.is_file() and good:
         try:
             report = json.loads(qc_path.read_text(encoding='utf-8'))
             scanned = set(report['chapters'])
+            fresh = {i for i in good if i in scanned and
+                     (folder / 'chapters' / f'{i:04d}.wav').stat().st_mtime <= float(report['timestamp'])}
+            from audiobookai_quality_review import load_states, status_of
+            states = load_states(folder)
+            issues = [issue for issue in report['issues']
+                      if issue.get('chapter') in fresh
+                      and status_of(issue, folder, states) == 'needs_review']
+            errors = sum(issue.get('severity') == 'error' for issue in issues)
+            warnings = sum(issue.get('severity') == 'warning' for issue in issues)
+            unresolved = (errors, warnings)
             if not expected_set.issubset(scanned):
                 qc = 'Incomplete scan'
             elif expected_set - set(good):
                 qc = 'Missing recorded audio'
-            elif any((folder / 'chapters' / f'{i:04d}.wav').stat().st_mtime >
-                     float(report['timestamp']) for i in good):
+            elif expected_set - fresh:
                 qc = 'Stale scan'
             else:
-                from audiobookai_quality_review import load_states, status_of
-                states = load_states(folder)
-                issues = [issue for issue in report['issues']
-                          if issue.get('chapter') in expected_set
-                          and status_of(issue, folder, states) == 'needs_review']
-                errors = sum(issue.get('severity') == 'error' for issue in issues)
-                warnings = sum(issue.get('severity') == 'warning' for issue in issues)
                 qc = f'{errors} errors, {warnings} warnings' if errors or warnings else 'Passed'
         except (OSError, ValueError, KeyError, TypeError):
             qc = 'Invalid report'
@@ -118,7 +122,7 @@ def inspect_book(folder, total, jobs=(), receipts=(), *, expected=None):
         'compatible': compatible, 'queue_parts': len(jobs),
         'finished_parts': sum(j.get('status') == 'complete' for j in jobs),
         'receipt_parts': len(receipts), 'verified_receipt_parts': len(verified_receipts),
-        'qc': qc, 'full_exports': full_exports,
+        'qc': qc, 'qc_unresolved': unresolved, 'full_exports': full_exports,
         'expected_seconds': sum(recorded[str(i)]['samples'] / recorded[str(i)]['sample_rate'] for i in good),
     }
 
@@ -144,8 +148,10 @@ def inspect_complete_m4b(path, expected_chapters, expected_seconds=None):
         chapters = data.get('chapters', [])
         if len(chapters) != len(expected_chapters):
             return f'Failed: {len(chapters)} chapter markers; expected {len(expected_chapters)}'
+        duration = float(data.get('format', {}).get('duration', 0))
+        if not math.isfinite(duration) or duration <= 0:
+            return 'Failed: invalid audio duration'
         if expected_seconds is not None:
-            duration = float(data.get('format', {}).get('duration', 0))
             if abs(duration - expected_seconds) > max(5.0, 0.005 * expected_seconds):
                 return f'Failed: duration differs from recorded chapters ({duration:.1f}s vs {expected_seconds:.1f}s)'
         return f'Passed container check: {len(chapters)} chapter markers, readable audio stream'

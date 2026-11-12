@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.17.0 — Finish Book
+
+- Use Finish Book to review gaps and quality findings, run a chapter scan,
+  and export the selected narrator edition from its saved chapter WAVs.
+- Verify the audio stream, chapter count, and duration before replacing a
+  complete M4B. Open Archive for metadata and cover options.
+
 ## 2.16.0 — Entire queue preflight
 
 - Check every queued part for unreadable EPUBs, invalid section selections,
