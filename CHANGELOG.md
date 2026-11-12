@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.14.0 — Intelligent Cache Manager
+
+- Record a lightweight SQLite catalog entry after successful new raw-chunk
+  writes and validated cache hits, including narrator reference identity,
+  Chatterbox settings, dialogue/prose, generation mode and last usage.
+  Store SHA-256 text hashes rather than actual EPUB/chunk text.
+- Read historic chapter indexes for protected cache references; backfill
+  old voice/setting identities only when the exact cache hash can be
+  reconstructed from the existing narrator reference. Unknown legacy
+  WAVs stay unclassified and protected by default.
+- Replace Studio's age-only raw-cache deletion UI with an asynchronous
+  verified inventory, narrator/settings profiles, protection counts,
+  conservative/advanced cleanup scopes, age filters, and exact-size
+  previews. No background or automatic deletion.
+- Require explicit confirmation and revalidate all candidate names,
+  sizes, device/inode, modified times, last-used settings and indexed
+  references before removing a file. Reject expired/mismatched previews,
+  mounted-SSD interruptions, and concurrent conversion.
+- Share an advisory cache-operation lock between the GUI, standalone
+  V7 engine, and headless runner. Preserve the existing cache symlink,
+  chapter WAVs, edited takes, M4Bs, voice samples and queue metadata.
+- Add offline synthetic regression tests for catalog identity, index
+  protection, stale previews, concurrent locks, unknown files and
+  all-or-nothing preflight failures.
+
+
 ## 2.13.0 — Automatic post-queue audio quality checks
 
 - Automatically scan saved chapter WAVs after the full queue's verified

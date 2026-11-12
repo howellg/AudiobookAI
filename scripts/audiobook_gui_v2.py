@@ -46,7 +46,10 @@ from audiobookai_convenience import (parse_section_ranges, job_category,
 from audiobookai_voices import (DEFAULT_VOICE, VOICE_DIR, SNAPSHOT_DIR, voice_choices,
                                 import_voice, freeze_voice, voice_name)
 from audiobookai_acting import recorded_folders, delivery_label
-from audiobookai_production import cache_summary, remove_raw_cache
+from audiobookai_cache_manager import (
+    operation_busy as cache_manager_busy, EVENT_PREFIX as CACHE_EVENT_PREFIX,
+    SUMMARY as CACHE_MANAGER_SUMMARY,
+)
 from audiobookai_editor import ChunkEditor
 from audiobookai_fullbook import (collect_export_groups, verify_export_group,
                                   recorded_export_indices,
@@ -243,7 +246,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.13.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.14.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -311,6 +314,13 @@ class Studio(QMainWindow):
         self.archive_proc = None
         self.model_proc = None
         self.model_action = None
+        self.cache_process = None
+        self.cache_worker_action = None
+        self.cache_worker_buffer = ''
+        self.cache_worker_error = ''
+        self.cache_worker_result = None
+        self.cache_preview_id = None
+        self.cache_preview_report = None
         self.archive_output = None
         self.archive_groups = []
         self._progress_last_values = {}
@@ -343,7 +353,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.13.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.14.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -2631,47 +2641,69 @@ class Studio(QMainWindow):
         storage.addWidget(mk_button('Calculate cache', self.calculate_cache_size))
         storage.addWidget(mk_button('Open cache folder', self.open_cache_folder))
         l.addLayout(storage)
-        storage_cleanup = QHBoxLayout()
-        storage_cleanup.addWidget(QLabel('Remove raw cached speech:'))
+        l.addWidget(title_label('Intelligent raw cache manager · safe preview first', 14))
+        cache_tip = QLabel(
+            'The cache catalog records narrator, voice settings, dialogue/prose and '
+            'last usage for newly generated or reused chunks. Saved chapter indexes '
+            'are checked for protected references. Old recordings without verifiable '
+            'metadata stay UNIDENTIFIED and cannot be selected for cleanup.')
+        cache_tip.setWordWrap(True)
+        cache_tip.setObjectName('muted')
+        l.addWidget(cache_tip)
+        cache_filters = QHBoxLayout()
+        cache_filters.addWidget(QLabel('Scope:'))
+        self.cleanup_scope = QComboBox()
+        self.cleanup_scope.addItem('Older standard dialogue before V2.10.0 (conservative)', 'legacy')
+        self.cleanup_scope.addItem('All verified unreferenced dialogue (may be reused)', 'dialogue')
+        self.cleanup_scope.addItem('Verified unreferenced WAVs, including prose (advanced)', 'all')
+        self.cleanup_scope.currentIndexChanged.connect(self.invalidate_cache_preview)
+        cache_filters.addWidget(self.cleanup_scope, 2)
+        cache_filters.addWidget(QLabel('Minimum age:'))
         self.cleanup_age = QComboBox()
-        for label, days in [('Older than 30 days', 30), ('Older than 90 days', 90),
-                            ('Older than 180 days', 180), ('All raw chunk WAVs', None)]:
+        for label, days in (('30 days', 30), ('90 days', 90), ('180 days', 180),
+                            ('365 days', 365)):
             self.cleanup_age.addItem(label, days)
         self.cleanup_age.setCurrentIndex(1)
-        storage_cleanup.addWidget(self.cleanup_age, 1)
-        storage_cleanup.addWidget(mk_button('Preview cleanup', self.preview_cache_cleanup))
-        storage_cleanup.addWidget(mk_button('Delete selected cache…', self.clean_cache))
-        l.addLayout(storage_cleanup)
-        self.cleanup_info = QLabel('Only raw cache WAVs are eligible. Finished M4Bs, chapter WAVs, '
-                                   'edited takes, EPUBs, narrator WAVs, and database files are never deleted.')
+        self.cleanup_age.currentIndexChanged.connect(self.invalidate_cache_preview)
+        cache_filters.addWidget(self.cleanup_age, 1)
+        l.addLayout(cache_filters)
+        actions = QHBoxLayout()
+        self.cache_scan_button = mk_button('Audit and preview', self.preview_cache_cleanup)
+        self.cache_delete_button = mk_button(
+            'Delete verified candidates…', self.clean_cache,
+            'No files are deleted until a recent preview is confirmed.')
+        self.cache_delete_button.setEnabled(False)
+        self.cache_stop_button = mk_button('Stop audit', self.stop_cache_audit)
+        self.cache_stop_button.setEnabled(False)
+        actions.addWidget(self.cache_scan_button)
+        actions.addWidget(self.cache_delete_button)
+        actions.addWidget(self.cache_stop_button)
+        actions.addStretch()
+        l.addLayout(actions)
+        self.cleanup_info = QLabel(
+            'No scan yet. All existing narration/cache files are retained. '
+            'Select a scope and run Audit and preview while generation is idle.')
         self.cleanup_info.setWordWrap(True)
-        self.cleanup_info.setObjectName('muted')
         l.addWidget(self.cleanup_info)
-        note = QLabel('Clearing raw cache can increase GPU work when resuming unfinished chapters or rebuilding edits. '
-                      'Cleanup is always manual and disabled while a conversion/editor operation is active.')
-        note.setObjectName('muted')
-        note.setWordWrap(True)
-        l.addWidget(note)
-
-        l.addWidget(title_label('Metadata backups · V2.8', 14))
-        self.backup_status = QLabel('Automatic metadata backups run every 30 minutes and '
-            'retain the newest 10. Copies are initially saved on this same disk.')
-        self.backup_status.setWordWrap(True)
-        self.backup_status.setObjectName('muted')
-        l.addWidget(self.backup_status)
-        backup_buttons = QHBoxLayout()
-        backup_buttons.addWidget(mk_button('Backup metadata now', self.backup_metadata_now))
-        backup_buttons.addWidget(mk_button('Verify latest backup', self.verify_latest_metadata_backup))
-        backup_buttons.addWidget(mk_button('Open backups folder', self.open_metadata_backup_folder))
-        backup_buttons.addStretch()
-        l.addLayout(backup_buttons)
-        backup_tip = QLabel('Metadata-only: SQLite queue, pronunciation rules/snapshots, '
-            'archive catalog and nonsecret configuration. EPUBs, voices, M4Bs, '
-            'chapter WAVs and raw caches must be backed up separately.')
-        backup_tip.setWordWrap(True)
-        backup_tip.setObjectName('muted')
-        l.addWidget(backup_tip)
-        l.addStretch()
+        self.cache_profiles = QTableWidget(0, 3)
+        self.cache_profiles.setHorizontalHeaderLabels(
+            ['Verified narrator / profile', 'Files', 'Size'])
+        self.cache_profiles.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.cache_profiles.setMaximumHeight(190)
+        self.cache_profiles.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.cache_profiles.setColumnWidth(1, 95)
+        self.cache_profiles.setColumnWidth(2, 125)
+        l.addWidget(self.cache_profiles)
+        cache_warning = QLabel(
+            'Review candidates carefully: even a verified unreferenced WAV can be '
+            'reused by future standard-mode jobs or chapter rebuilding. The default '
+            'scope is restricted to old standard-dialogue chunks. '
+            'No unidentified WAVs, indexed chapter recordings, M4Bs, chapter WAVs, '
+            'voice samples or edited takes are eligible. Cleanup requires explicit '
+            'confirmation and verifies every file again before deletion.')
+        cache_warning.setWordWrap(True)
+        cache_warning.setObjectName('muted')
+        l.addWidget(cache_warning)
 
     def start_model_action(self, action):
         """Run explicit model maintenance in a process separate from generation."""
@@ -4027,6 +4059,10 @@ class Studio(QMainWindow):
 
     def start_job(self, job_id):
         """Create a separate converter process with fixed sections, narrator, and output name."""
+        if cache_manager_busy():
+            self.run_queue = False
+            self.statusBar().showMessage('Cache Manager busy. Wait for the audit or cleanup to finish.')
+            return
         if getattr(self, 'quality_proc', None) is not None:
             self.run_queue = False
             self.statusBar().showMessage('Finish or stop the QC scan before generating.')
@@ -4960,47 +4996,183 @@ class Studio(QMainWindow):
             lambda _result: (self.refresh_review(), self.reader_after_editor(folder, chapter)))
         self.editor_dialog.show()
 
+    def invalidate_cache_preview(self, *_):
+        """Never reuse a preview if scope or age changed in the GUI."""
+        self.cache_preview_id = None
+        self.cache_preview_report = None
+        self.cache_delete_button.setEnabled(False)
+
+    def cache_manager_can_start(self):
+        if self.proc is not None or self.quality_proc is not None or (
+                self.full_export_proc is not None or self.model_proc is not None
+                or self.archive_proc is not None or getattr(self, 'cache_process', None) is not None):
+            QMessageBox.information(self, 'AudiobookAI busy',
+                'Finish current audiobook generation, archive, quality scan, '
+                'model download or cache operation before starting the cache manager.')
+            return False
+        editor = getattr(self, 'editor_dialog', None)
+        if editor is not None and editor.isVisible():
+            QMessageBox.information(self, 'Audio editor open',
+                'Close the chunk editor before auditing or deleting cache files.')
+            return False
+        if headless_runner_active() or cache_manager_busy():
+            QMessageBox.information(self, 'Cache in use',
+                'Finish the external converter or cache operation before continuing.')
+            return False
+        ready = cache_preflight(CACHE_DIR)
+        if not ready.ready or not CACHE_DIR.is_dir():
+            QMessageBox.warning(self, 'SSD unavailable', ready.detail)
+            return False
+        return True
+
+    def start_cache_worker(self, action, *, token=None):
+        """QProcess isolates the large index scan and safe deletion from Qt."""
+        self.cache_worker_action = action
+        self.cache_worker_result = None
+        self.cache_worker_error = ''
+        self.cache_worker_buffer = ''
+        self.cache_process = QProcess(self)
+        proc = self.cache_process
+        proc.setProgram(sys.executable)
+        args = ['-u', str(SCRIPTS / 'audiobookai_cache_manager.py'), action]
+        if action == 'scan':
+            args.extend(['--scope', str(self.cleanup_scope.currentData()),
+                         '--days', str(self.cleanup_age.currentData())])
+        else:
+            args.extend(['--token', str(token)])
+        proc.setArguments(args)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self.cache_worker_output)
+        proc.finished.connect(self.cache_worker_finished)
+        proc.errorOccurred.connect(self.cache_worker_error_event)
+        self.cache_scan_button.setEnabled(False)
+        self.cache_delete_button.setEnabled(False)
+        self.cache_stop_button.setEnabled(action == 'scan')
+        self.cleanup_info.setText(
+            'Auditing cache and checking chapter references (read-only)…'
+            if action == 'scan' else
+            'Revalidating every candidate and applying confirmed deletion…')
+        proc.start()
+
     def preview_cache_cleanup(self):
-        """Estimate files and bytes eligible for optional raw cache cleanup."""
-        days = self.cleanup_age.currentData()
-        try:
-            count, size = cache_summary(days)
-            suffix = f'older than {days} days' if days is not None else '(entire raw cache)'
-            self.cleanup_info.setText(
-                f'{count:,} raw chunk WAV files eligible {suffix}, freeing up to {fmt_size(size)}. '
-                'Chapter WAVs and M4B exports remain untouched. '
-                'Incomplete chapters may need fresh generation if their raw cache is deleted.')
-        except Exception as exc:
-            self.error('Cache preview error', exc)
+        """Scan verified identities; unknown and indexed WAVs remain protected."""
+        if not self.cache_manager_can_start():
+            return
+        self.invalidate_cache_preview()
+        self.start_cache_worker('scan')
 
     def clean_cache(self):
-        """Confirm and delete only eligible raw cache files—not edited takes or exports."""
-        if self.proc is not None or (getattr(self, 'editor_dialog', None) is not None
-                                     and self.editor_dialog.isVisible()):
-            QMessageBox.information(self, 'Generation in progress',
-                'Stop all generation or audio rebuilding before deleting raw cache files.')
+        """Explicit two-stage approval; subprocess revalidates before deleting."""
+        result = self.cache_preview_report
+        if (not result or not self.cache_preview_id
+            or self.cleanup_scope.currentData() != result['scope']
+            or self.cleanup_age.currentData() != result['age_days']):
+            self.invalidate_cache_preview()
+            self.cleanup_info.setText('Preview expired or filter changed. Run a new audit.')
             return
-        days = self.cleanup_age.currentData()
-        try:
-            count, size = cache_summary(days)
-            if not count:
-                self.cleanup_info.setText('No raw cache WAV files match that age filter.')
-                return
-            scope = f'older than {days} days' if days is not None else 'of all ages'
-            question = (f'Permanently delete {count:,} RAW speech WAVs ({fmt_size(size)}) {scope}?\n\n'
-                        'This does NOT delete your finished audiobooks, original chapter WAVs, '
-                        'narrator samples, edited takes, or the MySQL/SQLite databases.\n\n'
-                        'However, the deleted chunks cannot be used for offline chapter rebuilding '
-                        'and may need to be regenerated with the GPU. This cannot be undone.')
-            if QMessageBox.warning(self, 'Confirm raw cache deletion', question,
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
-                return
-            removed, freed = remove_raw_cache(days, expected_count=count)
-            self.cleanup_info.setText(f'Deleted {removed:,} raw cached WAV files ({fmt_size(freed)}). '
-                                      'Completed audiobook exports and edited takes were preserved.')
-            self.calculate_cache_size()
-        except Exception as exc:
-            self.error('Cache cleanup error', exc)
+        if not self.cache_manager_can_start():
+            return
+        number, size = result['candidate_files'], result['candidate_bytes']
+        if not number:
+            return
+        warning = (
+            f'Permanently delete {number:,} VERIFIED, UNREFERENCED WAV files '
+            f'({fmt_size(size)})?\n\n'
+            f'Scope: {result["scope_description"]}. '
+            f'Minimum age: {result["age_days"]} days.\n\n'
+            'These are no longer referenced by SAVED chunk indexes but could '
+            'still be useful in future conversions or chapter rebuilding. '
+            'All candidates will be reverified; changes cancel cleanup.\n\n'
+            'Unknown recordings, indexed speech, exports, edited takes, '
+            'voice samples and your SSD cache symlink are excluded. '
+            'Deletion is permanent and cannot be undone.')
+        answer = QMessageBox.warning(
+            self, 'Confirm verified raw cache deletion', warning,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.start_cache_worker('delete', token=self.cache_preview_id)
+
+    def cache_worker_output(self):
+        if self.cache_process is None:
+            return
+        self.cache_worker_buffer += bytes(
+            self.cache_process.readAllStandardOutput()).decode('utf-8', 'replace')
+        while '\n' in self.cache_worker_buffer:
+            line, self.cache_worker_buffer = self.cache_worker_buffer.split('\n', 1)
+            if not line.startswith(CACHE_EVENT_PREFIX):
+                continue
+            try:
+                payload = json.loads(line[len(CACHE_EVENT_PREFIX):])
+                kind = payload.get('kind')
+                if kind == 'complete':
+                    self.cache_worker_result = payload.get('result')
+                elif kind == 'error':
+                    self.cache_worker_error = str(payload.get('error','Unknown error'))[:420]
+                else:
+                    self.cleanup_info.setText(str(payload.get('message','Auditing…'))[:200])
+            except (ValueError, TypeError):
+                self.cache_worker_error = 'Invalid cache-worker response.'
+
+    def cache_worker_error_event(self, _error):
+        if self.cache_process is not None:
+            self.cache_worker_error = 'Unable to start cache worker: ' + self.cache_process.errorString()
+            if _error == QProcess.FailedToStart:
+                self.cache_worker_finished(1, QProcess.CrashExit)
+
+    def cache_worker_finished(self, exit_code, exit_status):
+        if self.cache_process is None:
+            return
+        self.cache_worker_output()
+        action = self.cache_worker_action
+        p = self.cache_process
+        self.cache_process = None
+        self.cache_worker_action = None
+        self.cache_scan_button.setEnabled(True)
+        self.cache_stop_button.setEnabled(False)
+        success = (exit_code == 0 and exit_status == QProcess.NormalExit
+                   and self.cache_worker_result is not None)
+        p.deleteLater()
+        if not success:
+            self.invalidate_cache_preview()
+            self.cleanup_info.setText(
+                'Cache operation stopped or failed. If a confirmed deletion was '
+                'interrupted, some eligible WAVs may already be gone; run a NEW '
+                'audit to verify the current state. ' +
+                (self.cache_worker_error or 'No completed result.'))
+            return
+        result = self.cache_worker_result
+        if action == 'scan':
+            self.cache_preview_report = result
+            self.cache_preview_id = result['id']
+            self.cache_delete_button.setEnabled(result['candidate_files'] > 0)
+            protected = result['categories']['protected_index']
+            unidentified = result['categories']['unknown']
+            self.cleanup_info.setText(
+                f"Cache: {result['total_files']:,} WAVs ({fmt_size(result['total_bytes'])}). "
+                f"Indexed and protected: {protected['files']:,}; "
+                f"unidentified and protected: {unidentified['files']:,}. "
+                f"Verifiable unreferenced candidates under selected policy: "
+                f"{result['candidate_files']:,} ({fmt_size(result['candidate_bytes'])}). "
+                'Nothing has been deleted.')
+            profiles = result.get('profiles', [])
+            self.cache_profiles.setRowCount(len(profiles))
+            for r, entry in enumerate(profiles):
+                for c, value in enumerate(
+                        (entry['name'], f"{entry['files']:,}",fmt_size(entry['bytes']))):
+                    self.cache_profiles.setItem(r, c, item(value))
+        else:
+            self.invalidate_cache_preview()
+            self.cleanup_info.setText(
+                f"Verified cleanup complete: {result['deleted_files']:,} "
+                f"hash WAVs ({fmt_size(result['deleted_bytes'])}) removed. "
+                'Finished M4Bs, chapter WAVs, saved metadata and unknown files preserved. '
+                'Audit again for updated figures.')
+
+    def stop_cache_audit(self):
+        if self.cache_process is not None and self.cache_worker_action == 'scan':
+            self.cache_process.kill()
 
     def refresh_settings(self):
         """Update settings summaries to reflect current on-disk state."""
@@ -5026,6 +5198,11 @@ class Studio(QMainWindow):
 
     def closeEvent(self, event):
         """Remember window state and ask for a safe shutdown if generation is active."""
+        if getattr(self, 'cache_process', None) is not None:
+            QMessageBox.information(self, 'Cache Manager is busy',
+                'Stop the audit or finish confirmed cleanup before closing Studio.')
+            event.ignore()
+            return
         if self.quality_proc is not None:
             QMessageBox.information(self, 'Quality scan running',
                 'Stop the quality scan before closing AudiobookAI.')
