@@ -245,6 +245,39 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.14.0: Intelligent raw cache inventory and verified cleanup
+
+In **Settings → Intelligent raw cache manager**, choose a verification
+scope and minimum age, then select **Audit and preview**. The manager
+identifies profiles by narrator/voice reference, effective Chatterbox
+settings, dialogue/prose, saved chapter-index references and recent
+usage. An older chunk is classified only when its exact cached key
+can be verified; all unidentified and indexed files are protected.
+
+The default cleanup scope only considers verifiable **pre-V2.10.0
+standard-dialogue cache** with no saved index reference. There are
+separate optional scopes for unreferenced dialogue or all verified
+unreferenced WAVs (including reusable prose). Those files may still
+be useful for future generation. No file is deleted until **Delete
+verified candidates…** is confirmed, and every candidate is
+revalidated in a separate process. Changing a filter invalidates
+the preview. Never unplug MySSD during an audit or cleanup.
+
+From V2.14.0 onward new recordings and reused cache chunks are
+registered automatically in `output/cache_manager/catalog.sqlite3`,
+which stores text hashes and acoustic settings, **not actual EPUB
+content**. Existing chapter indexes are reconciled conservatively.
+The indexed/unknown counts are not a measurement of obsolete
+storage; old WAVs whose identity cannot be reconstructed are kept.
+
+A cache operation lock prevents simultaneous conversion or another
+cache operation, including standalone V7 and headless generation.
+The cache manager never automatically deletes recordings; it does
+not modify M4B files, assembled chapter WAVs, edited takes or
+original EPUBs. The new metadata catalog is small enough to back
+up separately if wanted, but is not part of the normal metadata
+backup ZIP.
+
 ### V2.13.0: Automatic Quality Control after the queue
 
 Automatic QC is enabled by default from the **Quality Control** page
@@ -502,7 +535,7 @@ git pull
 
 Before any significant upgrade, close active conversions and back up the SQLite database, your narrator WAVs, and edited-take metadata. Do not delete `output/` or `voices/` to fix a Git problem.
 
-**Cache cleanup:** Use Settings to preview and manually delete old raw chunk WAVs. Doing so can force regeneration of incomplete chapters or make offline rebuild impossible until those chunks are recreated.
+**Cache cleanup:** Settings now provides a verified catalog-based inventory and explicit confirmation-only deletion. Existing index references and unclassified WAVs are protected. Removing even verified unreferenced audio may require later GPU regeneration; review the profile and minimum-age filters carefully.
 
 ## 10. Troubleshooting
 

@@ -30,6 +30,21 @@ import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
 from audiobookai_acting import chunk_settings
 from audiobookai_cache import ensure_cache_directory, cache_error_summary
+from audiobookai_cache_manager import note_chunk, operation_busy
+
+_CACHE_CATALOG_WARNING_SENT = False
+
+
+def record_cache_use(path, text):
+    """Catalog work is best-effort and never blocks successful TTS speech."""
+    global _CACHE_CATALOG_WARNING_SENT
+    try:
+        note_chunk(path, text, VOICE_FILE, ACTING_MODE, is_dialogue(text))
+    except Exception as exc:
+        if not _CACHE_CATALOG_WARNING_SENT:
+            print('Cache catalog metadata unavailable; narration continues: '
+                  + str(exc)[:120], flush=True)
+            _CACHE_CATALOG_WARNING_SENT = True
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_FILE = ROOT / "books" / "five_minute_test.txt"
@@ -295,6 +310,8 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
     from audiobookai_production import quality_report
     # Check the external cache link BEFORE loading or synthesizing speech.
     # A temporarily unmounted SSD must never be mistaken for an empty cache.
+    if operation_busy():
+        raise RuntimeError('Cache Manager audit or cleanup is active. Retry when it finishes.')
     ensure_cache_directory(CACHE_DIR)
     path = CACHE_DIR / f'{cache_key(text)}.wav'
     # Reusing identical voice/text/settings avoids another costly GPU inference.
@@ -309,6 +326,8 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
                 if assessment['flags']:
                     print('Audio review warning (cached): ' + ', '.join(assessment['flags']), flush=True)
                 print('Using cached audio.', flush=True)
+                if cache_write and not force:
+                    record_cache_use(path, text)
                 return raw
             print(f'Unusable cached chunk ({assessment["flags"]}); regenerating.', flush=True)
             if cache_write:
@@ -339,6 +358,7 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
                 try:
                     ta.save(str(temp), raw, sr)
                     temp.replace(path)
+                    record_cache_use(path, text)
                 finally:
                     temp.unlink(missing_ok=True)
             print(f'Generated {raw.shape[-1]/sr:.2f}s in {time.monotonic()-started:.2f}s', flush=True)
@@ -367,6 +387,7 @@ def generate_cached(model, text: str, sr: int, depth: int = 0,
                 try:
                     ta.save(str(temp), joined, sr)
                     temp.replace(path)
+                    record_cache_use(path, text)
                 finally:
                     temp.unlink(missing_ok=True)
             return joined
@@ -440,6 +461,8 @@ def main():
             print(f'{i:03d} [{c.boundary:9s}] {c.text}')
         print(f'\nTotal: {len(chunks)} chunks')
         return
+    if operation_busy():
+        raise RuntimeError('Cache Manager is scanning or cleaning. Wait before running V7.')
     regen = {int(x) for x in args.regen.split(',') if x.strip()}
     if any(n < 1 or n > len(chunks) for n in regen):
         parser.error(f'--regen must use chunk numbers 1 to {len(chunks)}')

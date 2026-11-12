@@ -26,6 +26,7 @@ from audiobookai_storage import Store
 from audiobookai_pronunciation import load_snapshot
 from audiobookai_reliability import append_diagnostic, diagnostic_hint, job_log_path
 from audiobookai_cache import cache_preflight
+from audiobookai_cache_manager import operation_busy as cache_manager_busy
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "output"
@@ -184,6 +185,10 @@ def run_job(store, job_id, *, process_factory=subprocess.Popen, verbose=False):
     command = checked_job(job)
     # Fail before changing SQLite status or starting a converter when its
     # shared cache symlink points at an unmounted SSD.
+    if cache_manager_busy():
+        raise RuntimeError(
+            'Cache Manager audit/cleanup is running. Retry the headless job '
+            'after it finishes; the queued part was not started.')
     report = cache_preflight(OUTPUT / "narration_cache_v2")
     if not report.ready:
         raise RuntimeError('Headless job remains queued: ' + report.detail)
