@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.11.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.12.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.12.0 optional ntfy.sh Android notifications:** Receive queue-finished, generation-failed, and cache-SSD-unavailable alerts via ntfy's hosted HTTPS service **without leaving Tailscale connected on your phone**. Generic, privacy-minded messages contain no book titles, paths, or diagnostics. Notifications send on background threads and never block Chatterbox or Qt. The 192-bit secret topic and settings are stored in ignored, user-readable-only `output/ntfy.json`. Enable/disable individual alerts, copy the topic and send a test from Settings. The ntfy.sh topic is public to anyone who knows its name; **treat the topic as a secret**. See Android setup below.
 - **V2.11.0 private phone dashboard:** A responsive, authenticated web dashboard (no new Python dependencies) displays live progress, job queue, ETA, logs, library and SSD status. Add and reorder jobs, select section ranges/part sizes/narrator/expressive mode, upload a new EPUB (24 MiB limit), start, safely pause after part, gracefully stop, retry, or clear queue entries. Studio remains the **single controller**: HTTP requests run through the Qt main thread so there is no competing converter or independent SQLite writer. The service binds to **127.0.0.1:8765**, is **off by default**, and requires a randomly generated access key. Reach it privately over HTTPS with **Tailscale Serve**, never Funnel. Studio must remain open and the laptop awake. See setup below.
 - **V2.10.5 clear entire queue:** **Queue → Clear entire queue…** removes all queue entries (queued, interrupted, failed, and completed) at once, even if a filter is active. A confirmation shows the number and statuses of affected parts, defaults to **No**, and cannot proceed while a converter is running or stopping. Only transient queue records are removed: imported EPUBs, saved M4Bs/WAVs, raw narration cache, frozen pronunciation snapshots, immutable completed-part receipts, and never-reused job IDs all remain. This is useful when choosing the wrong **Sections per part** count: after clearing, return to **Generate**, choose the correct size, and add the chapters again. Previously unfinished chapters will need requeueing; verified finished chapters remain recorded in the permanent history.
 - **V2.10.4 SSD cache preflight and recovery:** The GUI and headless runner now check the narration-cache directory and any external SSD symlink **before** marking a job running or launching Chatterbox. A missing mount pauses generation with the queued job preserved, rather than producing a repeated converter traceback or silently replacing the cache. Queue shows storage readiness and approximate free capacity, with **Check storage & resume** to resume the exact waiting job or the normal queue order after remounting. Optional **Auto-resume when SSD returns** (off by default, remembered across sessions) checks every 15 seconds **only while the current session is waiting for cache storage**. Manual Pause/Stop cancels pending auto-resume; launching Studio again does not automatically launch pending jobs. The headless runner exits with an actionable storage error while preserving the job's existing status. Cache inspection is read-only and does not mount drives or alter audio.
@@ -109,6 +110,42 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Android push notifications using ntfy.sh (V2.12.0)
+
+The desktop GUI can send **outgoing** notifications to the hosted ntfy.sh
+service over HTTPS. Your phone can receive them on Wi-Fi or mobile data
+**without Tailscale** (Tailscale is only required to open the private
+remote-control dashboard). Nothing needs to listen on a public port.
+
+1. On Android, install the official **ntfy** app from Google Play or F-Droid.
+2. After updating and reopening Studio, go to **Settings → Android
+   notifications**. Turn on **Enable Android notifications**.
+3. Click **Copy ntfy topic**. In the Android ntfy app, tap **+**, choose
+   server `ntfy.sh`, and paste the topic name. Subscribe.
+   (You can also use the special `ntfy://ntfy.sh/<topic>` link on Android.)
+4. After subscribing, click **Send test notification** in Studio. The
+   Settings status reports whether ntfy.sh accepted it; the phone should
+   display the message with ordinary Android notification permissions.
+
+Defaults: one notification when the automatically running queue empties
+after its last verified M4B export, when generation fails, or when a job
+cannot start because the cache SSD is unavailable. Failed/stopped partial
+exports never trigger a queue-complete notification. User-requested stops
+are not generation failures. Individual checkboxes can disable any alert.
+No alerts are sent for routine chunk/part completion. Notification delivery
+has an 8-second HTTP timeout, happens off the Qt thread, and cannot prevent
+a conversion from running.
+
+**Privacy:** The hosted `ntfy.sh` service treats topics as public unless
+separately protected; the secret topic is the access barrier. AudiobookAI
+generates a random 192-bit topic and stores it locally, with file mode 0600
+under ignored `output/ntfy.json`. Do not share your topic URL. Messages
+are deliberately generic, with no book/author names or log snippets.
+If the topic leaks, remove `output/ntfy.json` **only while Studio is closed**
+and restart to generate a new topic, then resubscribe the phone. Existing
+audio, queue and Tailscale configuration are unaffected. If the laptop has
+no internet, the alert is best-effort and the audiobook continues.
 
 ## Private mobile dashboard (V2.11.0)
 
