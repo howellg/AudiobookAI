@@ -248,7 +248,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.16.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.17.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -309,6 +309,7 @@ class Studio(QMainWindow):
         self.review_manifest = {}
         self.full_export_proc = None
         self.full_export_target = None
+        self.full_export_confirmed_path = None
         self.full_export_buffer = ''
         self.full_export_started_at = None
         self.full_export_percent = 0
@@ -358,12 +359,12 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.16.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.17.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
         self.nav = []
-        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive', 'Read Along', 'Book Integrity']):
+        for i, name in enumerate(['Library', 'Generate', 'Queue', 'Review audio', 'Settings', 'Quality Control', 'Pronunciation', 'Archive', 'Read Along', 'Finish Book']):
             btn = QPushButton(name)
             btn.setObjectName('navButton')
             btn.setCheckable(True)
@@ -926,9 +927,8 @@ class Studio(QMainWindow):
 
     def make_integrity_page(self):
         """Create the read-only per-book, per-narrator production audit."""
-        l = self.page_base('Book Completion & Integrity',
-            'Audit recorded chapters, queue history, missing files, quality control and complete-book exports. '
-            'The expected story range is inferred from existing work; excluded EPUB sections are always shown.')
+        l = self.page_base('Finish Book',
+            'Choose a narrator edition, review chapter coverage and audio quality, then export a complete M4B.')
         selectors = QHBoxLayout()
         selectors.addWidget(QLabel('Book:'))
         self.integrity_book = QComboBox()
@@ -958,13 +958,21 @@ class Studio(QMainWindow):
         self.integrity_checklist = QLabel('')
         self.integrity_checklist.setWordWrap(True)
         self.integrity_checklist.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.integrity_checklist.setTextFormat(Qt.PlainText)
         l.addWidget(self.integrity_checklist)
         actions = QHBoxLayout()
-        actions.addWidget(mk_button('Refresh integrity', self.integrity_refresh))
-        actions.addWidget(mk_button('Verify final M4B', self.integrity_verify_export))
+        actions.addWidget(mk_button('Refresh', self.integrity_book_changed))
         actions.addWidget(mk_button('Review chapters →', self.integrity_open_review))
         actions.addWidget(mk_button('Quality Control →', self.integrity_open_quality))
-        actions.addWidget(mk_button('Export complete M4B →', self.integrity_open_export))
+        actions.addWidget(mk_button('Scan chapter audio', self.integrity_scan_quality))
+        actions.addStretch()
+        l.addLayout(actions)
+        actions = QHBoxLayout()
+        self.finish_export_button = mk_button('Export verified M4B…', self.integrity_open_export)
+        self.finish_export_button.setEnabled(False)
+        actions.addWidget(self.finish_export_button)
+        actions.addWidget(mk_button('Verify existing M4B', self.integrity_verify_export))
+        actions.addWidget(mk_button('Archive metadata & cover →', self.integrity_open_archive))
         actions.addStretch()
         l.addLayout(actions)
         self.integrity_table = QTableWidget(0, 3)
@@ -997,26 +1005,45 @@ class Studio(QMainWindow):
 
     def integrity_book_changed(self, *_):
         """Discover each narrator folder, including orphaned manifest recordings."""
+        previous_book = getattr(self, 'integrity_group_book', None)
+        previous_index = self.integrity_voice.currentIndex()
+        previous_folder = (self.integrity_groups[previous_index]['folder']
+                           if 0 <= previous_index < len(self.integrity_groups) else None)
         self.integrity_groups = []
         self.integrity_voice.blockSignals(True)
         self.integrity_voice.clear()
         book_id = self.integrity_book.currentData()
+        self.integrity_group_book = book_id
         book = self.store.book(book_id) if book_id is not None else None
         if book:
             try:
                 conv = self.converter or load_converter()
                 self.converter = conv
                 base = conv.book_folder(Path(book['path']))
-                for folder in recorded_folders(base):
-                    manifest_path = folder / 'manifest.json'
-                    if not manifest_path.is_file():
+                editions = {folder.resolve(): {'folder': folder, 'voice_path': None,
+                                               'acting_mode': 'standard'}
+                            for folder in recorded_folders(base)
+                            if (folder / 'manifest.json').is_file()}
+                history = [row for row in self.store.jobs() if row['book_id'] == book_id]
+                history.extend(self.store.completed_parts(book_id))
+                for row in history:
+                    voice = row['voice_path']
+                    mode = row['acting_mode']
+                    try:
+                        folder = conv.book_folder(Path(book['path']), Path(voice) if voice else None, mode)
+                    except (OSError, ValueError):
                         continue
+                    editions[folder.resolve()] = {'folder': folder, 'voice_path': voice,
+                                                  'acting_mode': mode}
+                for edition in editions.values():
+                    folder = edition['folder']
+                    manifest_path = folder / 'manifest.json'
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                        voice = manifest.get('voice_path')
-                        mode = manifest.get('acting_mode', 'standard')
+                        voice = edition['voice_path'] or manifest.get('voice_path')
+                        mode = manifest.get('acting_mode', edition['acting_mode'])
                     except (OSError, ValueError, TypeError, AttributeError):
-                        voice = None
+                        voice = edition['voice_path']
                         mode = 'expressive' if folder.name == 'expressive' else 'standard'
                     self.integrity_groups.append({'folder': folder, 'voice_path': voice, 'acting_mode': mode})
                     self.integrity_voice.addItem(voice_name(voice) + delivery_label(mode),
@@ -1026,6 +1053,11 @@ class Studio(QMainWindow):
                     self.integrity_voice.addItem('British narrator (default)', 0)
             except Exception as exc:
                 self.integrity_summary.setText(f'Unable to discover narrator folders: {exc}')
+        if previous_book == book_id:
+            for index, edition in enumerate(self.integrity_groups):
+                if edition['folder'] == previous_folder:
+                    self.integrity_voice.setCurrentIndex(index)
+                    break
         self.integrity_voice.blockSignals(False)
         self.integrity_refresh()
 
@@ -1041,8 +1073,12 @@ class Studio(QMainWindow):
         book, narrator = self.integrity_current()
         self.integrity_last_audit = None
         self.integrity_last_folder = None
+        self.finish_export_button.setEnabled(False)
         self.integrity_export_check.setText('Final M4B not yet checked with FFprobe.')
+        if self.full_export_proc is not None and narrator and self.full_export_target.parent == narrator['folder']:
+            self.integrity_export_check.setText(f'Encoding {self.full_export_target.name}…')
         if not book or not narrator:
+            self.integrity_summary.setText('Select a book and narrator edition.')
             self.integrity_progress.setValue(0)
             self.integrity_table.setRowCount(0)
             self.integrity_counts.setText('')
@@ -1094,7 +1130,8 @@ class Studio(QMainWindow):
             count = len(expected)
             self.integrity_progress.setValue(round(completed * 100 / count))
             self.integrity_summary.setText(
-                f"{book['title']} — {voice_name(narrator['voice_path'])} | "
+                f"{book['title']} — {voice_name(narrator['voice_path'])}"
+                f"{delivery_label(narrator.get('acting_mode', 'standard'))} | "
                 f"Story range: sections {expected[0]}–{expected[-1]} ({count} selected of "
                 f"{audit['total']} EPUB sections).")
             self.integrity_counts.setText(
@@ -1104,9 +1141,11 @@ class Studio(QMainWindow):
                 f"Completed queue parts {audit['finished_parts']}/{audit['queue_parts']}  ·  "
                 f"Saved part receipts on disk {audit['verified_receipt_parts']}/{audit['receipt_parts']}")
             outside = compact_section_ranges(audit['outside']) if audit['outside'] else 'none'
-            missing = compact_section_ranges(audit['missing']) if audit['missing'] else 'none'
+            missing = compact_section_ranges(audit['missing'] + audit['not_started'] + audit['queued'])
             source_ready = Path(book['path']).is_file()
             exports = len(audit['full_exports'])
+            self.finish_export_button.setEnabled(audit['wav_ready'] and source_ready
+                                                and self.full_export_proc is None)
             checklist = [
                 f"{'✓' if source_ready else '✗'} EPUB imported and source available",
                 f"{'✓' if audit['receipt_parts'] else '—'} Completed part receipts: "
@@ -1115,20 +1154,30 @@ class Studio(QMainWindow):
                 f"{'✓' if audit['wav_ready'] else '✗'} All selected chapters recorded and "
                 'compatible for complete export',
                 f"{'✓' if audit['qc'] == 'Passed' else '—'} Audio quality: {audit['qc']}",
-                f"{'✓' if exports else '—'} Complete M4B on disk: {exports} "
-                '(chapter-count integrity not yet verified)',
+                f"{'✓' if exports else '—'} Complete M4B files on disk: {exports}",
                 f"Excluded EPUB sections (review intentionally omitted front/back matter): {outside}",
-                f"Missing/damaged within story range: {missing}",
+                f"Sections still needing audio within the story range: {missing}",
             ]
+            unresolved = audit['qc_unresolved']
+            if unresolved and any(unresolved) and audit['qc'] in (
+                    'Incomplete scan', 'Missing recorded audio', 'Stale scan'):
+                errors, warnings = unresolved
+                checklist.append(f'Findings in current scan coverage: {errors} errors, {warnings} warnings')
             if audit['manifest_error']:
                 checklist.append('Manifest error: ' + audit['manifest_error'])
             self.integrity_checklist.setText('\n'.join(checklist))
         except Exception as exc:
+            self.integrity_last_audit = None
             self.integrity_summary.setText(f'Integrity inspection failed: {exc}')
             self.integrity_progress.setValue(0)
+            self.integrity_table.setRowCount(0)
+            self.integrity_counts.clear()
+            self.integrity_checklist.clear()
+            self.finish_export_button.setEnabled(False)
 
     def integrity_verify_export(self):
         """Explicitly verify final container chapter count and duration."""
+        self.integrity_refresh()
         audit = self.integrity_last_audit
         if not audit or not audit['expected']:
             self.integrity_export_check.setText('No story range is selected for verification.')
@@ -1169,9 +1218,54 @@ class Studio(QMainWindow):
                     self.quality_narrator.setCurrentIndex(i)
                     break
 
+    def integrity_scan_quality(self):
+        self.integrity_refresh()
+        audit = self.integrity_last_audit
+        if not audit or not audit['recorded']:
+            QMessageBox.information(self, 'Quality Control', 'Generate chapter audio before scanning.')
+            return
+        editor = getattr(self, 'editor_dialog', None)
+        if (self.proc is not None or self.full_export_proc is not None
+                or self.archive_proc is not None or self.quality_proc is not None
+                or (editor is not None and editor.isVisible() and editor.proc is not None)):
+            QMessageBox.information(self, 'Audio is busy', 'Finish the active audio task before scanning.')
+            return
+        self.quality_launch(self.integrity_last_folder, audit['recorded'], audit['recorded'])
+        self.integrity_export_check.setText('Scanning recorded chapter WAVs…')
+
     def integrity_open_export(self):
-        self.integrity_open_review()
-        self.export_complete_book()
+        # Refresh on click in case generation, edits or external file changes
+        # made the previous coverage report stale.
+        self.integrity_refresh()
+        book, edition = self.integrity_current()
+        audit = self.integrity_last_audit
+        if not book or not edition or not audit or not self.finish_export_button.isEnabled():
+            return
+        self.export_complete_book(finish=(book, edition, audit))
+
+    def integrity_open_archive(self):
+        self.integrity_refresh()
+        book, edition = self.integrity_current()
+        if not book or not edition:
+            return
+        audit = self.integrity_last_audit
+        if not audit or not audit['wav_ready']:
+            QMessageBox.information(self, 'Edition incomplete',
+                'Resolve missing chapters and unfinished parts before archiving this edition.')
+            return
+        if self.archive_proc is not None:
+            QMessageBox.information(self, 'Archive busy', 'Wait for the active archive export.')
+            return
+        self.change_page(7)
+        index = self.archive_book.findData(book['id'])
+        if index >= 0:
+            self.archive_book.setCurrentIndex(index)
+        group = dict(edition, indices=audit['expected'], parts=[], unfinished=[], finish_book=True)
+        self.archive_groups.append(group)
+        self.archive_narrator.addItem(
+            voice_name(edition['voice_path']) + delivery_label(edition.get('acting_mode', 'standard'))
+            + ' · Finish Book coverage')
+        self.archive_narrator.setCurrentIndex(len(self.archive_groups) - 1)
 
     def make_quality_page(self):
         """Create the read-only QC dashboard for existing chapter and chunk WAVs.
@@ -1995,9 +2089,10 @@ class Studio(QMainWindow):
                     coverage_note = (f" · WARNING: {len(coverage['interior'])} interior "
                                      f"EPUB section(s) missing: "
                                      f"{compact_section_ranges(coverage['interior'])}")
+            coverage_source = ('Finish Book coverage' if group.get('finish_book') else
+                               f"{len(group['parts'])-len(group['unfinished'])}/{len(group['parts'])} finished parts")
             self.archive_summary.setText(
-                f"{'Ready for archive' if ready else 'Still generating'} · "
-                f"{len(group['parts'])-len(group['unfinished'])}/{len(group['parts'])} finished parts · "
+                f"{'Ready for archive' if ready else 'Still generating'} · {coverage_source} · "
                 f"{len(group['indices'])} selected sections · {length} audio{coverage_note}")
             exported = Path(metadata.get('last_export', '')) if metadata.get('last_export') else None
             self.archive_result.setText(f'Last archive: {exported}' if exported and exported.is_file()
@@ -2037,7 +2132,7 @@ class Studio(QMainWindow):
 
     def archive_start_export(self):
         """Validate completion and start an isolated offline metadata/export worker."""
-        if self.proc is not None or self.full_export_proc is not None or self.archive_proc is not None:
+        if self.complete_export_busy():
             QMessageBox.information(self, 'Export busy', 'Finish the active audio task first.')
             return
         editor = getattr(self, 'editor_dialog', None)
@@ -2076,6 +2171,10 @@ class Studio(QMainWindow):
                     self, 'Overwrite existing archive', f'Replace the existing file?\n{target}',
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
+            if self.complete_export_busy():
+                QMessageBox.information(self, 'Export busy',
+                    'An audio task started while the archive confirmation was open.')
+                return
             self.archive_save_metadata()
             args = ['-u', str(SCRIPTS / 'audiobookai_archive.py'),
                     '--epub', str(book['path']), '--folder', str(group['folder']),
@@ -2086,6 +2185,8 @@ class Studio(QMainWindow):
                 args += ['--acting-mode', group['acting_mode']]
             for key in ('title', 'author', 'series', 'volume', 'narrator'):
                 args += [f'--{key}', details[key]]
+            if group.get('finish_book'):
+                args += ['--fresh-source']
             if details['cover']:
                 args += ['--cover', details['cover']]
         except Exception as exc:
@@ -3773,7 +3874,7 @@ class Studio(QMainWindow):
             'queue_activity': list(activity.events)[-12:],
             'queue_status': activity.status,
             'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
-            'version': '2.16.0', 'run_queue': bool(self.run_queue),
+            'version': '2.17.0', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -4260,6 +4361,12 @@ class Studio(QMainWindow):
     def start_job(self, job_id):
         """Create a separate converter process with fixed sections, narrator, and output name."""
         if self.proc is not None:
+            return
+        if (getattr(self, 'full_export_proc', None) is not None
+                or getattr(self, 'archive_proc', None) is not None):
+            self.run_queue = False
+            self.statusBar().showMessage('Finish the active audiobook export before starting narration.')
+            Studio.set_queue_activity(self, 'paused', 'Waiting for audiobook export', job_id)
             return
         Studio.set_queue_activity(self, 'launching', 'Checking launch requirements', job_id)
         try:
@@ -4946,7 +5053,12 @@ class Studio(QMainWindow):
             for c, value in enumerate(details):
                 self.export_table.setItem(r, c, item(value, str(path) if c == 0 else None))
 
-    def export_complete_book(self):
+    def complete_export_busy(self):
+        return (self.proc is not None or self.run_queue or self.full_export_proc is not None
+                or self.archive_proc is not None or self.quality_proc is not None
+                or headless_runner_active())
+
+    def export_complete_book(self, *, finish=None):
         """Export saved parts or all verified chapter WAVs for one narrator.
 
         The chapter manifest can contain regenerated sections missing from
@@ -4954,20 +5066,24 @@ class Studio(QMainWindow):
         and retain the existing narrator isolation and preflight validation.
         The export runs in its own process to keep Qt responsive.
         """
-        if self.proc is not None or self.run_queue or self.full_export_proc is not None:
+        if self.complete_export_busy():
             QMessageBox.information(self, 'Export unavailable',
-                'Finish or pause the active conversion/export before making a complete book.')
+                'Finish or pause the active audio task before making a complete book.')
             return
         editor = getattr(self, 'editor_dialog', None)
         if editor is not None and editor.isVisible() and editor.proc is not None:
             QMessageBox.information(self, 'Audio editor busy',
                 'Finish rebuilding audio in the editor before exporting a complete book.')
             return
-        book_id = self.review_selected_book_id()
-        if book_id is None:
-            QMessageBox.information(self, 'Choose a book', 'Select a book in Review audio first.')
-            return
-        book = self.store.book(book_id)
+        if finish is None:
+            book_id = self.review_selected_book_id()
+            if book_id is None:
+                QMessageBox.information(self, 'Choose a book', 'Select a book in Review audio first.')
+                return
+            book = self.store.book(book_id)
+        else:
+            book, edition, audit = finish
+            book_id = book['id']
         if not book:
             return
         epub = Path(book['path'])
@@ -4977,51 +5093,65 @@ class Studio(QMainWindow):
         try:
             conv = self.converter or load_converter()
             self.converter = conv
-            # Each job keeps its original narrator snapshot. Resolve folders
-            # with that path instead of the currently selected Generate voice.
-            history = [dict(row) for row in self.store.jobs()]
-            history.extend(self.store.recorded_jobs_for_export(book_id))
-            groups = collect_export_groups(history, book_id, conv.book_folder)
-            if not groups:
-                raise ValueError('No completed or queued parts exist for this book.')
-            if len(groups) > 1:
-                choices = [f"{voice_name(g['voice_path'])}{delivery_label(g.get('acting_mode', 'standard'))} — "
-                           f"{len(g['parts'])} part(s), {len(g['indices'])} sections, "
-                           f"{len(g['unfinished'])} unfinished" for g in groups]
-                selected, accepted = QInputDialog.getItem(
-                    self, 'Choose narrator', 'Combine parts recorded with:', choices, 0, False)
-                if not accepted:
-                    return
-                group = groups[choices.index(selected)]
+            if finish is not None:
+                if not audit['wav_ready']:
+                    raise ValueError('Resolve missing audio and unfinished parts before exporting.')
+                group = dict(edition, indices=audit['expected'], unfinished=[])
+                voice = Path(group['voice_path']) if group['voice_path'] else None
+                actual = conv.book_folder(epub, voice, group.get('acting_mode', 'standard'))
+                if actual.resolve() != group['folder'].resolve():
+                    raise ValueError('The saved narrator no longer matches this edition’s folder.')
+                indices = verify_export_group(group, int(book['sections']))
+                source_note = 'the selected chapter WAVs'
             else:
-                group = groups[0]
-            total_sections = int(book['sections'])
-            saved_indices = verify_export_group(group, total_sections)
-            manifest_indices = recorded_export_indices(group, total_sections)
-            extra_indices = sorted(set(manifest_indices) - set(saved_indices))
-            indices = saved_indices
-            using_manifest = False
-            if extra_indices:
-                choices = [
-                    (f"All recorded chapters — {len(manifest_indices)} sections "
-                     f"({manifest_indices[0]}–{manifest_indices[-1]}); "
-                     f"+{len(extra_indices)} beyond saved parts"),
-                    (f"Saved parts only — {len(saved_indices)} sections "
-                     f"({saved_indices[0]}–{saved_indices[-1]})"),
-                ]
-                selection, accepted = QInputDialog.getItem(
-                    self, 'Choose chapters for complete audiobook',
-                    (f"Found {len(extra_indices)} additional finished chapter WAV(s) "
-                     f"in {voice_name(group['voice_path'])}'s manifest: "
-                     f"{compact_section_ranges(extra_indices)}.\n"
-                     'These recordings are not included in saved part history. '
-                     'Which chapters should the full-book export include?'),
-                    choices, 0, False)
-                if not accepted:
-                    return
-                using_manifest = selection == choices[0]
-                if using_manifest:
-                    indices = manifest_indices
+                # Each job keeps its original narrator snapshot. Resolve folders
+                # with that path instead of the currently selected Generate voice.
+                history = [dict(row) for row in self.store.jobs()]
+                history.extend(self.store.recorded_jobs_for_export(book_id))
+                groups = collect_export_groups(history, book_id, conv.book_folder)
+                if not groups:
+                    raise ValueError('No completed or queued parts exist for this book.')
+                if len(groups) > 1:
+                    choices = [f"{voice_name(g['voice_path'])}{delivery_label(g.get('acting_mode', 'standard'))} — "
+                               f"{len(g['parts'])} part(s), {len(g['indices'])} sections, "
+                               f"{len(g['unfinished'])} unfinished" for g in groups]
+                    selected, accepted = QInputDialog.getItem(
+                        self, 'Choose narrator', 'Combine parts recorded with:', choices, 0, False)
+                    if not accepted:
+                        return
+                    group = groups[choices.index(selected)]
+                else:
+                    group = groups[0]
+                total_sections = int(book['sections'])
+                saved_indices = verify_export_group(group, total_sections)
+                manifest_indices = recorded_export_indices(group, total_sections)
+                extra_indices = sorted(set(manifest_indices) - set(saved_indices))
+                indices = saved_indices
+                using_manifest = False
+                if extra_indices:
+                    choices = [
+                        (f"All recorded chapters — {len(manifest_indices)} sections "
+                         f"({manifest_indices[0]}–{manifest_indices[-1]}); "
+                         f"+{len(extra_indices)} beyond saved parts"),
+                        (f"Saved parts only — {len(saved_indices)} sections "
+                         f"({saved_indices[0]}–{saved_indices[-1]})"),
+                    ]
+                    selection, accepted = QInputDialog.getItem(
+                        self, 'Choose chapters for complete audiobook',
+                        (f"Found {len(extra_indices)} additional finished chapter WAV(s) "
+                         f"in {voice_name(group['voice_path'])}'s manifest: "
+                         f"{compact_section_ranges(extra_indices)}.\n"
+                         'These recordings are not included in saved part history. '
+                         'Which chapters should the full-book export include?'),
+                        choices, 0, False)
+                    if not accepted:
+                        return
+                    using_manifest = selection == choices[0]
+                    if using_manifest:
+                        indices = manifest_indices
+                source_note = (f"{len(group['parts'])} saved part(s) plus "
+                               f"{len(extra_indices)} independently recorded chapter WAV(s)"
+                               if using_manifest else f"{len(group['parts'])} saved part(s)")
             # Reuse the converter's filename sanitization; put the final book
             # alongside its existing parts in the narrator-specific folder.
             output_name = conv.safe_name(book['title'], 100) + '_COMPLETE'
@@ -5029,9 +5159,6 @@ class Studio(QMainWindow):
             coverage_note = export_coverage_message(indices, int(book['sections']))
             overwrite = '\nAn existing complete M4B will be replaced after verification.' if output.exists() else ''
             quality_note = quality_preflight(group['folder'], indices)
-            source_note = (f"{len(group['parts'])} saved part(s) plus "
-                           f"{len(extra_indices)} independently recorded chapter WAV(s)"
-                           if using_manifest else f"{len(group['parts'])} saved part(s)")
             prompt = (f"Combine {source_note} into one M4B?\n\n"
                       f"Narrator: {voice_name(group['voice_path'])}\n"
                       f"Chapters: {len(indices)} (EPUB sections {indices[0]}–{indices[-1]})\n"
@@ -5047,14 +5174,32 @@ class Studio(QMainWindow):
             self.error('Cannot export complete audiobook', exc)
             return
 
+        if self.complete_export_busy():
+            QMessageBox.information(self, 'Export unavailable',
+                'An audio task started while the export confirmation was open.')
+            return
+        if finish is not None:
+            self.integrity_refresh()
+            current = self.integrity_last_audit
+            if (not current or not current['wav_ready'] or current['expected'] != indices
+                    or self.integrity_last_folder != group['folder']):
+                QMessageBox.information(self, 'Coverage changed',
+                    'Review the updated Finish Book checklist before exporting.')
+                return
+
         arguments = ['-u', str(CONVERTER_FILE), 'export', str(epub),
                      '--chapters', ','.join(map(str, indices)),
-                     '--output-name', output_name, '--studio-events', '--export-progress']
+                     '--output-name', output_name, '--studio-events', '--export-progress',
+                     '--verify-complete']
         if group['voice_path']:
             arguments += ['--voice', str(group['voice_path'])]
         if group.get('acting_mode', 'standard') != 'standard':
             arguments += ['--acting-mode', group['acting_mode']]
         self.full_export_target = output
+        self.full_export_confirmed_path = None
+        if finish is not None:
+            self.finish_export_button.setEnabled(False)
+            self.integrity_export_check.setText(f'Encoding {output.name}…')
         self.full_export_buffer = ''
         self.full_export_started_at = time.monotonic()
         self.full_export_percent = 0
@@ -5130,7 +5275,7 @@ class Studio(QMainWindow):
                         self.full_export_speed = event.get('speed')
                         self.full_export_progress.setValue(self.full_export_percent)
                     elif kind == 'export_done':
-                        # Final 100% waits for verified successful process exit.
+                        self.full_export_confirmed_path = Path(event['path'])
                         self.full_export_progress_label.setText(
                             'Encoded; final M4B validation complete. Finishing…')
                 except (ValueError, KeyError, TypeError, OverflowError, AttributeError):
@@ -5156,6 +5301,9 @@ class Studio(QMainWindow):
             self.full_export_proc = None
             self.full_export_target = None
             proc.deleteLater()
+            if self.stack.currentIndex() == 9:
+                self.integrity_refresh()
+                self.integrity_export_check.setText(self.full_export_progress_label.text())
 
     def complete_export_finished(self, exit_code, exit_status):
         """Finalize progress only after the verified complete M4B appears."""
@@ -5169,7 +5317,8 @@ class Studio(QMainWindow):
         self.full_export_ui_timer.stop()
         target = self.full_export_target
         good = (exit_code == 0 and exit_status == QProcess.NormalExit
-                and target is not None and target.is_file())
+                and target is not None and target == self.full_export_confirmed_path
+                and target.is_file())
         elapsed = (max(0, time.monotonic() - self.full_export_started_at)
                    if self.full_export_started_at is not None else 0)
         if good:
@@ -5196,6 +5345,12 @@ class Studio(QMainWindow):
         self.full_export_target = None
         proc.deleteLater()
         self.refresh_review()
+        if self.stack.currentIndex() == 9:
+            self.integrity_refresh()
+            if target and self.integrity_last_folder == target.parent:
+                self.integrity_export_check.setText(
+                    f'Verified M4B: {target.name} · audio stream, chapter markers and duration passed.'
+                    if good else 'Complete export failed. See the Queue log for details.')
 
 
     def selected_export_path(self):

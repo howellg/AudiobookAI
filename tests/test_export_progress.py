@@ -10,6 +10,7 @@ import wave
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
@@ -75,7 +76,7 @@ class ProgressParserTests(unittest.TestCase):
                     result = converter.export_m4b(
                         folder / 'book.epub', 'Progress Book', 'Author',
                         sections, [1, 2], folder, 'Progress_Book_COMPLETE',
-                        report_progress=True)
+                        report_progress=True, verify_complete=True)
             finally:
                 converter.STUDIO_EVENTS = previous
             self.assertTrue(result.is_file())
@@ -116,6 +117,16 @@ class ProgressParserTests(unittest.TestCase):
             self.assertTrue(updates, output.getvalue())
             self.assertTrue(all(0 <= event['percent'] <= 99 for event in updates))
             self.assertEqual(events[0]['duration_seconds'], 2)
+
+            previous_audio = result.read_bytes()
+            with patch('audiobookai_integrity.inspect_complete_m4b',
+                       return_value='Failed: 1 chapter marker; expected 2'):
+                with self.assertRaisesRegex(RuntimeError, 'expected 2'):
+                    converter.export_m4b(folder / 'book.epub', 'Progress Book', 'Author',
+                                         sections, [1, 2], folder, result.stem,
+                                         verify_complete=True)
+            self.assertEqual(result.read_bytes(), previous_audio)
+            self.assertFalse(result.with_suffix('.partial.m4b').exists())
 
 
 class GuiStreamingTests(unittest.TestCase):

@@ -100,6 +100,8 @@ class BookIntegrityTests(unittest.TestCase):
             self.assertIn('Failed: 82', inspect_complete_m4b(target, range(3, 205), 202))
             run.return_value = result(202, 400)
             self.assertIn('duration differs', inspect_complete_m4b(target, range(3, 205), 202))
+            run.return_value = result(202, float('nan'))
+            self.assertIn('invalid audio duration', inspect_complete_m4b(target, range(3, 205), 202))
             run.return_value = result(202, 202, audio=False)
             self.assertIn('no audio stream', inspect_complete_m4b(target, range(3, 205), 202))
 

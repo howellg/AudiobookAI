@@ -541,7 +541,8 @@ def ffconcat_quote(path: Path):
     return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
 
 
-def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, output_name=None, *, report_progress=False):
+def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, output_name=None, *, report_progress=False,
+               verify_complete=False, staging_dir=None):
     """Export chapter recordings under an explicit noncolliding part filename."""
     manifest = read_manifest(out / "manifest.json")
     recorded = manifest.get("chapters", {})
@@ -553,10 +554,11 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
     if len(sample_rates) != 1:
         raise RuntimeError("Chapters have different sample rates. Regenerate to the same format.")
     out.mkdir(parents=True, exist_ok=True)
-    concat = out / "chapters.ffconcat"
+    export_dir = out if staging_dir is None else staging_dir
+    concat = export_dir / "chapters.ffconcat"
     concat.write_text("ffconcat version 1.0\n" + "".join(
         f"file {ffconcat_quote(chapter_path(out, i))}\n" for i in chosen), encoding="utf-8")
-    metadata = out / "chapters.ffmetadata"
+    metadata = export_dir / "chapters.ffmetadata"
     lines = [";FFMETADATA1", f"title={ffmeta_escape(title)}", f"artist={ffmeta_escape(author)}", f"album={ffmeta_escape(title)}"]
     elapsed_samples = 0
     sr = next(iter(sample_rates))
@@ -569,7 +571,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
     metadata.write_text("\n".join(lines) + "\n", encoding="utf-8")
     name = readable_m4b_basename(output_name, 130) if output_name else (
         safe_name(title, 100) + ("_sample" if len(chosen)<len(sections) else ""))
-    output = out / (name + ".m4b")
+    output = export_dir / (name + ".m4b")
     partial = output.with_name(output.stem + ".partial.m4b")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
            "-i", str(concat), "-f", "ffmetadata", "-i", str(metadata),
@@ -620,12 +622,20 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
                 raise subprocess.CalledProcessError(return_code, tracked_cmd)
         else:
             subprocess.run(cmd, check=True)
-        # Reject zero-length or unplayable files before replacing any prior export.
-        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                                "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-                                str(partial)], capture_output=True, text=True, check=True)
-        if not partial.is_file() or partial.stat().st_size < 1024 or float(probe.stdout.strip()) <= 0:
-            raise RuntimeError("FFmpeg produced an invalid audiobook; previous export untouched")
+        if not partial.is_file() or partial.stat().st_size < 1024:
+            raise RuntimeError("FFmpeg produced an invalid audiobook")
+        if verify_complete:
+            from audiobookai_integrity import inspect_complete_m4b
+            check = inspect_complete_m4b(partial, chosen, duration_seconds)
+            if not check.startswith('Passed container check:'):
+                raise RuntimeError(check)
+        else:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(partial)],
+                capture_output=True, text=True, check=True)
+            if float(probe.stdout.strip()) <= 0:
+                raise RuntimeError("FFmpeg produced an invalid audiobook")
         partial.replace(output)
     finally:
         if partial.exists():
@@ -655,6 +665,8 @@ def main():
                         help="Immutable per-job spoken-text substitutions (new jobs only)")
     parser.add_argument("--studio-events", action="store_true", help="Print machine-readable JSON progress events")
     parser.add_argument("--export-progress", action="store_true", help="Track FFmpeg M4B encoding when used with --studio-events")
+    parser.add_argument("--verify-complete", action="store_true",
+                        help="Verify audio, chapter count and duration before publishing a complete export")
     parser.add_argument("--chunk", type=int, help="1-based chunk number for render-chunk")
     parser.add_argument("--replacement-text", help="New spoken text for render-chunk")
     args = parser.parse_args()
@@ -706,7 +718,8 @@ def main():
             export_m4b(epub_path, title, author, sections, selected, out, args.output_name)
     else:
         export_m4b(epub_path, title, author, sections, selected, out, args.output_name,
-                   report_progress=args.export_progress and args.studio_events)
+                   report_progress=args.export_progress and args.studio_events,
+                   verify_complete=args.verify_complete)
 
 
 if __name__ == "__main__":
