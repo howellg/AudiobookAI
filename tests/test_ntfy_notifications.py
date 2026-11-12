@@ -35,7 +35,21 @@ class SettingsTests(unittest.TestCase):
         self.assertGreaterEqual(len(first['topic']), 40)
         self.assertEqual(ensure_config(self.path), first)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertTrue(all(first['events'].values()))
+        self.assertFalse(first['events']['queue_stalled'])
+        self.assertTrue(all(enabled for event, enabled in first['events'].items()
+                            if event != 'queue_stalled'))
+
+    def test_existing_profile_keeps_stall_alert_opt_in(self):
+        original = ensure_config(self.path, enabled=True)
+        del original['events']['queue_stalled']
+        self.path.write_text(json.dumps(original))
+        loaded = read_config(self.path)
+        self.assertEqual(loaded['topic'], original['topic'])
+        self.assertTrue(loaded['enabled'])
+        self.assertFalse(loaded['events']['queue_stalled'])
+        sender = NtfyPublisher(self.path, sender=lambda *_: None)
+        sender.update(event='queue_stalled', checked=True)
+        self.assertTrue(read_config(self.path)['events']['queue_stalled'])
 
     def test_config_can_be_activated_and_event_flags_changed(self):
         sender = NtfyPublisher(self.path, sender=lambda *_: None)

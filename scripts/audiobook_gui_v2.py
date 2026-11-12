@@ -64,6 +64,7 @@ from audiobookai_gui_throttle import (progress_snapshot, routine_speech_log,
 from audiobookai_headless import headless_runner_active
 from audiobookai_cache import cache_preflight
 from audiobookai_mobile import MobileBridge, MobileHTTPServer, DEFAULT_PORT
+from audiobookai_queue_activity import QueueActivity
 from audiobookai_ntfy import NtfyPublisher, CONFIG_PATH as NTFY_CONFIG_PATH
 from audiobookai_reliability import (
     append_diagnostic, check_resume_job, create_metadata_backup,
@@ -247,7 +248,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.14.2')
+        self.setWindowTitle('AudiobookAI Studio — V2.15.0')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -284,6 +285,7 @@ class Studio(QMainWindow):
         self.active_job_id = None
         self.stop_requested = False
         self.run_queue = False
+        self.queue_activity = QueueActivity()
         # Storage waits never change the SQLite job status. No QProcess exists
         # while the required external cache volume is unavailable.
         self.storage_waiting = False
@@ -355,7 +357,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.14.2 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.15.0 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -430,6 +432,10 @@ class Studio(QMainWindow):
         self.elapsed_timer.setInterval(500)
         self.elapsed_timer.timeout.connect(self.tick)
         self.elapsed_timer.timeout.connect(self.flush_generation_logs)
+        self.queue_watchdog = QTimer(self)
+        self.queue_watchdog.setInterval(5000)
+        self.queue_watchdog.timeout.connect(self.check_queue_stall)
+        self.queue_watchdog.start()
         # Runs only during a complete-book export, not during narration.
         self.full_export_ui_timer = QTimer(self)
         self.full_export_ui_timer.setInterval(1000)
@@ -753,6 +759,12 @@ class Studio(QMainWindow):
         self.queue_mode_status.setObjectName('muted')
         self.queue_mode_status.setWordWrap(True)
         l.addWidget(self.queue_mode_status)
+        self.queue_activity_view = QPlainTextEdit()
+        self.queue_activity_view.setReadOnly(True)
+        self.queue_activity_view.setAccessibleName('Recent queue activity')
+        self.queue_activity_view.setPlaceholderText('Queue activity will appear here.')
+        self.queue_activity_view.setMaximumHeight(100)
+        l.addWidget(self.queue_activity_view)
         additional = QHBoxLayout()
         additional.addWidget(mk_button('Run ONE part only', self.run_one_job,
             'Explicit single-part mode: stop after this selected part finishes'))
@@ -2561,6 +2573,7 @@ class Studio(QMainWindow):
             ('queue_complete', 'Notify when the automatic queue finishes'),
             ('generation_failed', 'Notify when a part fails'),
             ('storage_unavailable', 'Notify when the narration cache SSD is unavailable'),
+            ('queue_stalled', 'Notify when the queue stops making progress'),
             ('quality_attention', 'Notify when automatic quality checks find issues'),
         ):
             control = QCheckBox(title)
@@ -3721,10 +3734,12 @@ class Studio(QMainWindow):
         self.clear_storage_wait()
         self.run_queue = False
         if self.proc is None:
+            Studio.set_queue_activity(self, 'paused', 'Queue paused')
             return {'message': 'Queue paused; no part currently running.'}
         if self.stop_requested:
             return {'message': 'Graceful stop is already in progress.'}
         self.stop_requested = True
+        Studio.set_queue_activity(self, 'stopping', 'Stopping safely', self.active_job_id)
         self.store.update_job(self.active_job_id, 'stopping')
         self.refresh_jobs()
         self.write_log('Remote graceful stop requested. Already cached chunks are retained.')
@@ -3748,8 +3763,12 @@ class Studio(QMainWindow):
         voices = [{'id': 'default', 'name': 'Default British narrator'}]
         voices.extend({'id': str(path.relative_to(VOICE_DIR.resolve())),
                        'name': path.stem} for path in voice_choices())
+        activity = self.queue_activity
         return {
-            'version': '2.14.2', 'run_queue': bool(self.run_queue),
+            'queue_activity': list(activity.events)[-12:],
+            'queue_status': activity.status,
+            'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
+            'version': '2.15.0', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -4012,6 +4031,7 @@ class Studio(QMainWindow):
         if detail != self.storage_last_warning:
             self.write_log('Queue paused before launching Chatterbox: ' + detail)
         self.storage_last_warning = detail
+        Studio.set_queue_activity(self, 'waiting', 'Waiting for cache SSD', job_id)
         if first_warning:
             post_optional_alert(self, 'storage_unavailable')
         if self.storage_auto_resume.isChecked():
@@ -4058,6 +4078,24 @@ class Studio(QMainWindow):
         if label is not None:
             label.setText(message)
 
+    def refresh_queue_activity(self):
+        activity = self.queue_activity
+        self.queue_activity_view.setPlainText('\n'.join(reversed(activity.events)))
+        self.queue_activity_view.setToolTip(activity.status)
+
+    def set_queue_activity(self, phase, message, job_id=None):
+        activity = getattr(self, 'queue_activity', None)
+        if activity is not None and activity.transition(phase, message, job_id):
+            Studio.refresh_queue_activity(self)
+            if phase in ('failed', 'waiting'):
+                Studio.show_queue_mode(self, 'Queue paused · see recent activity for the reason.')
+
+    def check_queue_stall(self):
+        if self.queue_activity.check_stall():
+            Studio.refresh_queue_activity(self)
+            self.statusBar().showMessage(self.queue_activity.status)
+            post_optional_alert(self, 'queue_stalled')
+
     def continue_queue_if_requested(self):
         """Respect a late remote/desktop Pause after part, even in the 350ms gap."""
         if self.run_queue and self.proc is None:
@@ -4069,10 +4107,12 @@ class Studio(QMainWindow):
             self.stop_quality()
             self.run_queue = True
             self.auto_quality_restart_queue = True
+            Studio.set_queue_activity(self, 'waiting', 'Waiting for automatic quality scan to stop')
             # The worker's finished() callback will resume only if not paused.
             # Never run a converter concurrently with the CPU WAV audit.
             return
         if getattr(self, 'quality_proc', None) is not None:
+            Studio.set_queue_activity(self, 'paused', 'Finish or stop the manual quality scan')
             self.statusBar().showMessage('Finish or stop the manual QC scan before starting narration.')
             return
         if self.proc is not None:
@@ -4091,6 +4131,8 @@ class Studio(QMainWindow):
         else:
             self.run_queue = False
             Studio.show_queue_mode(self, 'Queue idle — no pending parts.')
+            if getattr(getattr(self, 'queue_activity', None), 'phase', None) != 'complete':
+                Studio.set_queue_activity(self, 'idle', 'Queue idle')
             self.statusBar().showMessage('Queue empty — no pending jobs.')
 
     def _run_selected_part(self, *, single_part):
@@ -4145,42 +4187,90 @@ class Studio(QMainWindow):
         self.run_queue = False
         Studio.show_queue_mode(self, 'Queue paused — current part will finish; next part will not start.')
         if self.proc is not None:
+            activity = getattr(self, 'queue_activity', None)
+            if activity is not None:
+                activity.record('Will pause after this part', self.active_job_id)
+                Studio.refresh_queue_activity(self)
             self.statusBar().showMessage('Will finish this M4B part, then pause before the next one.')
             self.write_log('Queue set to pause after the current part finishes.')
         else:
+            Studio.set_queue_activity(self, 'paused', 'Queue paused')
             self.statusBar().showMessage('Queue paused. No part is currently running.')
 
     def start_job(self, job_id):
         """Create a separate converter process with fixed sections, narrator, and output name."""
+        if self.proc is not None:
+            return
+        Studio.set_queue_activity(self, 'launching', 'Checking launch requirements', job_id)
+        try:
+            Studio.prepare_converter(self, job_id)
+        except Exception as exc:
+            activity = getattr(self, 'queue_activity', None)
+            step = activity.message if activity is not None else 'Converter setup'
+            message = f'{step} failed: {exc}'
+            Studio.converter_launch_failed(self, job_id, message)
+
+    def converter_launch_failed(self, job_id, message):
+        """Release partial process setup and report the failure even if SQLite is unavailable."""
+        process = self.proc
+        self.proc = None
+        self.active_job_id = None
+        self.run_queue = False
+        self.elapsed_timer.stop()
+        if process is not None:
+            process.deleteLater()
+        self.write_log(message)
+        detail = message
+        if self.active_job_log is not None:
+            detail += f' · Log: {self.active_job_log}'
+        self.active_job_log = None
+        Studio.set_queue_activity(self, 'failed', message, job_id)
+        self.active_title.setText('Converter failed to start — see queue activity')
+        self.statusBar().showMessage(message)
+        post_optional_alert(self, 'generation_failed')
+        try:
+            if job_id is not None:
+                self.store.update_job(job_id, 'failed', error=detail)
+            self.refresh_jobs()
+        except Exception as exc:
+            self.write_log(f'Could not save launch failure: {exc}')
+
+    def prepare_converter(self, job_id):
+        """Check prerequisites, configure the process, and request its launch."""
         if cache_manager_busy():
             self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Waiting for Cache Manager', job_id)
             self.statusBar().showMessage('Cache Manager busy. Wait for the audit or cleanup to finish.')
             return
         if getattr(self, 'quality_proc', None) is not None:
             self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Finish or stop the quality scan', job_id)
             self.statusBar().showMessage('Finish or stop the QC scan before generating.')
             return
         if headless_runner_active():
             self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Headless converter is active', job_id)
             self.statusBar().showMessage('Headless converter active; GUI generation paused.')
             self.error('Headless conversion running',
                        'A headless audiobook conversion is active. Do not start a second '
                        'converter for the same cache. Resume GUI generation only after it ends.')
             return
-        if self.proc is not None:
-            return
         if self.model_proc is not None:
             self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Model maintenance is active', job_id)
             QMessageBox.information(self, 'Model maintenance in progress',
                 'Finish checking or downloading the Chatterbox model before generating.')
             return
         editor = getattr(self, 'editor_dialog', None)
         if editor is not None and editor.isVisible():
             self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Close the audio editor to resume', job_id)
             self.statusBar().showMessage('Close the audio editor before starting conversion to avoid simultaneous chapter changes.')
             return
         job = self.store.job(job_id)
         if job is None or job['status'] != 'queued':
+            self.run_queue = False
+            Studio.set_queue_activity(self, 'paused', 'Selected part is no longer queued', job_id)
             return
         # Strictly read-only check BEFORE logging, allocating QProcess, or
         # marking SQLite running. Never regenerate into a missing symlink.
@@ -4195,6 +4285,7 @@ class Studio(QMainWindow):
         epub = Path(job['book_path'])
         if not epub.is_file():
             self.store.update_job(job_id, 'failed', error='EPUB file missing')
+            Studio.set_queue_activity(self, 'failed', 'EPUB file missing', job_id)
             post_optional_alert(self, 'generation_failed')
             self.refresh_jobs()
             self.run_queue = False
@@ -4203,14 +4294,18 @@ class Studio(QMainWindow):
         for needed in (CONVERTER_FILE, SCRIPTS / 'test_five_minutes_v7_smooth.py'):
             if not needed.is_file():
                 self.run_queue = False
+                Studio.set_queue_activity(self, 'failed', 'Converter files are missing', job_id)
+                post_optional_alert(self, 'generation_failed')
                 self.error('Missing component', f'Place the V7 scripts in {SCRIPTS}: {needed.name}')
                 return
         nums = json.loads(job['indices'])
         arguments = ['-u', str(CONVERTER_FILE), 'convert', str(epub),
-                     '--chapters', ','.join(map(str, nums)), '--output-name', job['output_name'], '--studio-events']
+                     '--chapters', ','.join(map(str, nums)), '--output-name', job['output_name'],
+                     '--studio-events', '--export-progress']
         snapshot = snapshot_path_for_job(job_id) if job['pronunciation_required'] else None
         if job['pronunciation_required'] and snapshot is None:
             self.store.update_job(job_id, 'failed', error='Queued pronunciation snapshot is missing')
+            Studio.set_queue_activity(self, 'failed', 'Queued pronunciation snapshot is missing', job_id)
             post_optional_alert(self, 'generation_failed')
             self.refresh_jobs()
             self.run_queue = False
@@ -4226,21 +4321,25 @@ class Studio(QMainWindow):
             voice = Path(job['voice_path'])
             if not voice.is_file():
                 self.store.update_job(job_id, 'failed', error='Queued narrator WAV is missing')
+                Studio.set_queue_activity(self, 'failed', 'Queued narrator WAV is missing', job_id)
                 post_optional_alert(self, 'generation_failed')
                 self.refresh_jobs()
                 self.run_queue = False
                 self.error('Missing narrator WAV', f'The saved narrator for this part is missing: {voice}')
                 return
             arguments.extend(['--voice', str(voice)])
-        self.maybe_auto_metadata_backup()
         self.active_job_log = job_log_path(self.diagnostic_dir, job_id)
         self.diagnostic_lines.clear()
+        Studio.set_queue_activity(self, 'launching', 'Preparing metadata backup', job_id)
+        self.maybe_auto_metadata_backup()
+        Studio.set_queue_activity(self, 'launching', 'Starting converter', job_id)
         self.proc = QProcess(self)
         self.proc.setProgram(sys.executable)
         self.proc.setArguments(arguments)
         self.proc.setWorkingDirectory(str(ROOT))
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self.consume_output)
+        self.proc.started.connect(lambda: Studio.converter_started(self, job_id))
         self.proc.finished.connect(self.process_finished)
         self.proc.errorOccurred.connect(self.process_error)
         self.stop_requested = False
@@ -4274,7 +4373,11 @@ class Studio(QMainWindow):
         self._last_paint = 0.0
         self.write_log(f"\n──── Starting job #{job_id}: {job['name']} · {voice_name(job['voice_path'])} ────")
         self.proc.start()
-        self.statusBar().showMessage('Chatterbox conversion running…')
+
+    def converter_started(self, job_id):
+        if self.active_job_id == job_id and not self.stop_requested:
+            Studio.set_queue_activity(self, 'preparing', 'Converter started · preparing narration', job_id)
+            self.statusBar().showMessage('Chatterbox conversion running…')
 
     def consume_output(self):
         """Read incremental converter stdout and split control events from readable logs."""
@@ -4307,6 +4410,16 @@ class Studio(QMainWindow):
     def progress_event(self, event):
         """Interpret JSON progress events and update chapter, total, and export state."""
         kind = event['event']
+        activity = getattr(self, 'queue_activity', None)
+        if kind == 'export_progress':
+            if activity is not None and not self.stop_requested and activity.phase == 'exporting':
+                if activity.export_progress(float(event['encoded_seconds']), int(event['percent'])):
+                    Studio.refresh_queue_activity(self)
+                text = f'Encoding M4B… {activity.export_percent}%'
+                if self.chapter_text.text() != text:
+                    self.chapter_text.setText(text)
+            return
+        previous_chunk = None
         if kind == 'plan':
             self.plan = {int(s['index']): s for s in event['sections']}
             self.total_chunks = sum(int(s['chunks']) for s in self.plan.values())
@@ -4321,7 +4434,8 @@ class Studio(QMainWindow):
             self.current_chunk = int(event['chunk'])
             self.current_total = int(event['total'])
             # Monotonic accounting prevents duplicate/replayed cache events reversing progress.
-            self.done_chunks[idx] = max(self.done_chunks.get(idx, 0), self.current_chunk)
+            previous_chunk = self.done_chunks.get(idx, 0)
+            self.done_chunks[idx] = max(previous_chunk, self.current_chunk)
             if event.get('seconds') is not None:
                 sample = max(0.001, float(event['seconds']))
                 self.recent_chunk_durations.append(sample)
@@ -4347,6 +4461,17 @@ class Studio(QMainWindow):
             self.exporting = False
             self.last_output_path = event['path']
             self.write_log(f"Finished M4B: {self.last_output_path} ({fmt_size(event['size_bytes'])})")
+        if activity is not None and not self.stop_requested:
+            if kind == 'plan':
+                Studio.set_queue_activity(self, 'narrating', 'Generating narration', self.active_job_id)
+            elif kind == 'export_started':
+                Studio.set_queue_activity(self, 'exporting', 'Encoding M4B', self.active_job_id)
+            elif kind == 'export_done':
+                Studio.set_queue_activity(self, 'verifying', 'M4B exported · recording completion', self.active_job_id)
+            elif kind in ('chapter_started', 'chapter_done') or (
+                    kind == 'chunk_done' and self.current_chunk > previous_chunk):
+                if activity.progress():
+                    Studio.refresh_queue_activity(self)
         # Coalesce cached chunk repaint bursts; always paint chapter/export boundaries.
         paint_time = time.monotonic()
         if kind != 'chunk_done' or paint_time - getattr(self, '_last_paint', 0.0) >= 0.5:
@@ -4408,11 +4533,13 @@ class Studio(QMainWindow):
         self.run_queue = False
         Studio.show_queue_mode(self, 'Queue stopped — click Start queue to resume remaining parts.')
         if self.proc is None:
+            Studio.set_queue_activity(self, 'paused', 'Queue paused')
             self.statusBar().showMessage('Queue paused. Start queue when you are ready.')
             return
         if self.stop_requested:
             return
         self.stop_requested = True
+        Studio.set_queue_activity(self, 'stopping', 'Stopping safely', self.active_job_id)
         self.store.update_job(self.active_job_id, 'stopping')
         self.refresh_jobs()
         self.write_log('Stop requested. The backend will stop after the current TTS chunk, preserving its cache.')
@@ -4435,28 +4562,12 @@ class Studio(QMainWindow):
         """Persist converter launch failures instead of leaving a phantom running job."""
         if self.proc is None:
             return
-        message = f'Process error: {self.proc.errorString()}'
-        self.diagnostic_lines.append(message)
-        self.write_log(message)
+        message = self.proc.errorString()
         if error == QProcess.FailedToStart:
-            job_id = self.active_job_id
-            if job_id is not None:
-                self.store.update_job(job_id, 'failed',
-                    error=f'Converter could not start: {message}' +
-                          (f' · Log: {self.active_job_log}' if self.active_job_log else ''))
-            failed_process = self.proc
-            self.tick()
-            self.flush_generation_logs()
-            self.elapsed_timer.stop()
-            self.proc = None
-            self.active_job_log = None
-            self.active_job_id = None
-            self.run_queue = False
-            failed_process.deleteLater()
-            self.active_title.setText('Converter failed to start — see log')
-            self.refresh_jobs()
-            self.statusBar().showMessage('Converter could not start; queue paused.')
-            post_optional_alert(self, 'generation_failed')
+            Studio.converter_launch_failed(self, self.active_job_id, f'Converter could not start: {message}')
+        else:
+            self.diagnostic_lines.append(f'Process error: {message}')
+            self.write_log(f'Process error: {message}')
 
     def process_finished(self, exit_code, exit_status):
         """Verify an export and transition the job to complete, interrupted, or failed."""
@@ -4493,15 +4604,18 @@ class Studio(QMainWindow):
             self.overall_progress.setValue(1000)
             self.overall_text.setText('Overall: 100% · Export verified')
             self.active_title.setText('Finished successfully')
+            Studio.set_queue_activity(self, 'complete', 'Part complete · M4B verified', job_id)
             self.write_log('✓ Conversion and M4B export finished successfully.')
         elif stopped:
             self.store.update_job(job_id, 'interrupted', error='Stopped by user; press Retry selected to resume.')
+            Studio.set_queue_activity(self, 'paused', 'Part interrupted · cached speech retained', job_id)
             self.active_title.setText('Stopped — cached speech retained')
             self.write_log('Job interrupted. Retry this part to continue using cached speech.')
         else:
             hint = diagnostic_hint(self.diagnostic_lines, exit_code)
             detail = hint + (f' · Log: {self.active_job_log}' if self.active_job_log else '')
             self.store.update_job(job_id, 'failed', error=detail)
+            Studio.set_queue_activity(self, 'failed', f'Generation failed: {hint}', job_id)
             self.active_title.setText('Generation failed — see log')
             self.write_log(f'Generation failed (exit code {exit_code}).')
             self.run_queue = False
@@ -4525,16 +4639,19 @@ class Studio(QMainWindow):
             next_part = self.store.next_job()
             if next_part is None:
                 # Notify only when all queued M4Bs are verified.
+                Studio.set_queue_activity(self, 'complete', 'Queue finished · all requested parts completed')
                 post_optional_alert(self, 'queue_complete')
                 Studio.show_queue_mode(self, 'Queue finished — all requested parts completed.')
             else:
                 Studio.show_queue_mode(self,
                     f'Continuous queue ON — next queued part #{next_part["id"]}.')
+                Studio.set_queue_activity(self, 'handoff', 'Next queued part selected', next_part['id'])
                 self.write_log(f'Continuing automatically to queued part #{next_part["id"]}.')
             # Schedule the next job after this signal handler unwinds.
             QTimer.singleShot(350, self.continue_queue_if_requested)
         else:
             if good and self.store.next_job() is not None:
+                Studio.set_queue_activity(self, 'paused', 'Queue paused after completed part', job_id)
                 Studio.show_queue_mode(self,
                     'Queue paused after this part. Use Start queue for continuous generation.')
                 self.write_log(
@@ -5384,6 +5501,7 @@ class Studio(QMainWindow):
                 self.mobile_http.stop()
                 self.mobile_http = None
             self.mobile_timer.stop()
+            self.queue_watchdog.stop()
             self.ntfy_timer.stop()
             if self.mysql_mirror:
                 self.mysql_mirror.disconnect()

@@ -47,6 +47,12 @@ EVENTS = {
         'priority': '4',
         'tags': 'warning',
     },
+    'queue_stalled': {
+        'title': 'AudiobookAI - queue may be stalled',
+        'message': 'Progress has stopped for longer than expected. Check Studio queue activity.',
+        'priority': '4',
+        'tags': 'warning',
+    },
     'quality_attention': {
         'title': 'AudiobookAI - quality review needed',
         'message': 'Automatic quality checks flagged audio that may need review. Open Studio Quality Control.',
@@ -59,6 +65,7 @@ DEFAULT_FLAGS = {
     'generation_failed': True,
     'storage_unavailable': True,
     'quality_attention': True,
+    'queue_stalled': False,
 }
 
 
