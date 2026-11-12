@@ -246,7 +246,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.14.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.14.1')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -353,7 +353,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.14.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.14.1 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -725,9 +725,9 @@ class Studio(QMainWindow):
         l = self.page_base('Conversion queue', 'Jobs and progress persist locally and sync to MySQL when connected. Interrupted jobs reuse V7 chunk caches.')
         bar = QHBoxLayout()
         bar.addWidget(mk_button('▶ Start queue', self.start_queue,
-            'Start queued parts, or resume automatic continuation after the current selected part'))
-        bar.addWidget(mk_button('Run selected', self.run_selected_job,
-            'Generate just the selected queued part, then pause the queue'))
+            'Start or resume automatic sequential processing of ALL queued parts'))
+        bar.addWidget(mk_button('▶ From selected', self.run_selected_job,
+            'Start with the selected part, then automatically continue queued parts'))
         bar.addWidget(mk_button('Pause after part', self.pause_after_part,
             'Finish the active M4B part without starting the next one'))
         bar.addWidget(mk_button('■ Stop safely', self.stop_job))
@@ -745,7 +745,15 @@ class Studio(QMainWindow):
             bar.addWidget(control)
         bar.addStretch()
         l.addLayout(bar)
+        self.queue_mode_status = QLabel(
+            'Queue idle — Start queue runs all pending parts continuously. '
+            'From selected also continues automatically.')
+        self.queue_mode_status.setObjectName('muted')
+        self.queue_mode_status.setWordWrap(True)
+        l.addWidget(self.queue_mode_status)
         additional = QHBoxLayout()
+        additional.addWidget(mk_button('Run ONE part only', self.run_one_job,
+            'Explicit single-part mode: stop after this selected part finishes'))
         additional.addWidget(mk_button('Use chosen narrator', self.change_queued_narrator,
             'Apply the voice selected on Generate to the selected QUEUED part'))
         additional.addWidget(mk_button('▶ Play M4B', self.open_selected_output,
@@ -3999,6 +4007,12 @@ class Studio(QMainWindow):
         else:
             self.statusBar().showMessage('Cache storage ready. Click Start queue to continue.')
 
+    def show_queue_mode(self, message):
+        """Report queue behavior without changing the stored user preferences."""
+        label = getattr(self, 'queue_mode_status', None)
+        if label is not None:
+            label.setText(message)
+
     def continue_queue_if_requested(self):
         """Respect a late remote/desktop Pause after part, even in the 350ms gap."""
         if self.run_queue and self.proc is None:
@@ -4018,18 +4032,24 @@ class Studio(QMainWindow):
             return
         if self.proc is not None:
             self.run_queue = True
+            Studio.show_queue_mode(self, 'Continuous queue ON — the next queued part will start automatically.')
+            self.write_log('Continuous queue enabled for the active part.')
             return
         self.clear_storage_wait()
         self.run_queue = True
         nxt = self.store.next_job()
         if nxt is not None:
+            Studio.show_queue_mode(self, 'Continuous queue ON — moving through queued parts automatically.')
             self.start_job(nxt['id'])
+            if self.proc is not None:
+                self.write_log('Continuous queue started; subsequent parts will run automatically.')
         else:
             self.run_queue = False
+            Studio.show_queue_mode(self, 'Queue idle — no pending parts.')
             self.statusBar().showMessage('Queue empty — no pending jobs.')
 
-    def run_selected_job(self):
-        """Start only the selected queue entry instead of auto-running all jobs."""
+    def _run_selected_part(self, *, single_part):
+        """Start a selected part with explicit continuous or one-part semantics."""
         job_id = self.selected_job_id()
         if job_id is None:
             QMessageBox.information(self, 'Select a part', 'Choose a queued part first.')
@@ -4039,18 +4059,34 @@ class Studio(QMainWindow):
                 'Finish or stop the active part before starting another one.')
             return
         job = self.store.job(job_id)
-        if job['status'] != 'queued':
+        if job is None or job['status'] != 'queued':
             QMessageBox.information(self, 'Job not queued',
                 'Use Retry selected first if this part is interrupted or failed.')
             return
         self.clear_storage_wait()
-        self.run_queue = False
+        self.run_queue = not single_part
+        if single_part:
+            Studio.show_queue_mode(self, 'ONE part only — automatic continuation is disabled.')
+            self.write_log('Single-part generation selected. The queue will pause after this part.')
+        else:
+            Studio.show_queue_mode(self,
+                'Continuous queue ON — selected part first, then remaining queued parts.')
+            self.write_log('Continuous queue started from selected part.')
         self.start_job(job_id)
+
+    def run_selected_job(self):
+        """Generate from the selected entry, then continue remaining queued work."""
+        self._run_selected_part(single_part=False)
+
+    def run_one_job(self):
+        """Explicit opt-in to generate just one selected part."""
+        self._run_selected_part(single_part=True)
 
     def pause_after_part(self):
         """Stop automatic queue advancement after the active M4B finishes."""
         self.clear_storage_wait()
         self.run_queue = False
+        Studio.show_queue_mode(self, 'Queue paused — current part will finish; next part will not start.')
         if self.proc is not None:
             self.statusBar().showMessage('Will finish this M4B part, then pause before the next one.')
             self.write_log('Queue set to pause after the current part finishes.')
@@ -4312,6 +4348,7 @@ class Studio(QMainWindow):
         """Request an orderly stop that retains previously completed chunk audio."""
         self.clear_storage_wait()
         self.run_queue = False
+        Studio.show_queue_mode(self, 'Queue stopped — click Start queue to resume remaining parts.')
         if self.proc is None:
             self.statusBar().showMessage('Queue paused. Start queue when you are ready.')
             return
@@ -4427,13 +4464,26 @@ class Studio(QMainWindow):
             # Defer scanning until converter QProcess has fully unwound.
             QTimer.singleShot(900, self.quality_queue_drained)
         if self.run_queue and good:
-            if self.store.next_job() is None:
-                # Only notify after the verified M4B and permanent receipt
-                # have been committed; do not ping for every part.
+            next_part = self.store.next_job()
+            if next_part is None:
+                # Notify only when all queued M4Bs are verified.
                 post_optional_alert(self, 'queue_complete')
+                Studio.show_queue_mode(self, 'Queue finished — all requested parts completed.')
+            else:
+                Studio.show_queue_mode(self,
+                    f'Continuous queue ON — next queued part #{next_part["id"]}.')
+                self.write_log(f'Continuing automatically to queued part #{next_part["id"]}.')
             # Schedule the next job after this signal handler unwinds.
             QTimer.singleShot(350, self.continue_queue_if_requested)
         else:
+            if good and self.store.next_job() is not None:
+                Studio.show_queue_mode(self,
+                    'Queue paused after this part. Use Start queue for continuous generation.')
+                self.write_log(
+                    'Queue paused after completed part; choose Start queue for continuous mode.')
+            elif not good:
+                Studio.show_queue_mode(self,
+                    'Queue stopped after interruption/failure. Review the job before retrying.')
             self.run_queue = False
 
     def retry_selected(self):

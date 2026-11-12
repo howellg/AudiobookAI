@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.14.1 — Continuous queue controls clarified
+
+- Desktop **Start queue** continues through all queued parts in SQLite
+  order, while **From selected** now starts at the selected queued part
+  and continues automatically after its verified M4B completion.
+- Move the former selected-one-off action into clearly labeled
+  **Run ONE part only**. Retain explicit **Pause after part**, safe Stop,
+  and mobile dashboard's intentional one-part action.
+- Add a prominent continuous/single/paused queue-mode indicator and
+  transition diagnostics, making it clear why a completed part will or
+  will not launch another. The Generate **Start queue immediately**
+  preference is independent of post-part continuation.
+- Test three sequential verified outputs through a real isolated
+  SQLite queue, plus from-selected, one-part-only, pause and
+  mid-part continuation enablement. Narration, caches, generated
+  M4Bs, historical receipts and model settings are unchanged.
+
+
 ## 2.14.0 — Intelligent Cache Manager
 
 - Record a lightweight SQLite catalog entry after successful new raw-chunk

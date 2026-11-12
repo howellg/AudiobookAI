@@ -4,13 +4,14 @@
 
 AudiobookAI Studio imports DRM-free EPUBs, turns selected chapters into narrated WAVs, and exports chapter-marked M4B audiobooks. It is designed for long-running conversions on local hardware: audio chunks are cached, interrupted jobs can resume, and completed chapters can be reviewed and repaired without generating an entire book again.
 
-> **Project status:** Personal-use / in-development software (current application: **Studio V2.14.0**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
+> **Project status:** Personal-use / in-development software (current application: **Studio V2.14.1**, using the **V7 Smooth** narration engine). Developed and exercised on **Arch Linux + KDE Plasma**, using an NVIDIA GTX 1650 with 4 GB VRAM. A clean install on other computers and operating systems is **not yet validated**. This repository is source code, not a standalone AppImage or packaged installer.
 
 ## Features
 
 - **EPUB import and chapter selection:** Browse books, inspect EPUB sections, filter chapters, enter ranges (`3-17, 20`), and queue a whole book in manageable parts.
 - **Selectable narrator WAVs:** Import a voice reference recording, preview it, and choose a narrator for each queued job. The app snapshots alternate narrators so later edits to the source WAV do not silently change pending jobs.
 - **V7 Smooth generation:** Chatterbox narration with conservative text chunking, protective token limits, and audio assembly with pauses.
+- **V2.14.1 continuous queue usability fix:** On the Queue page, **Start queue** runs every pending part automatically; **From selected** now also continues through the rest of the queue after that selected part, while **Run ONE part only** is an explicit separate action. A persistent queue-mode indicator shows continuous vs single-part vs paused/stopped, and the job log records automatic transitions. **Pause after part** and **Stop safely** still override continuation. The Generate-page **Start queue immediately** preference controls only whether generation begins as soon as parts are added, not what happens between parts once continuous mode is active. The mode is session-only: reopening Studio does not automatically start a queued audiobook.
 - **V2.14.0 Intelligent Cache Manager:** Settings includes an asynchronous, GPU-free cache inventory with narrator/voice and acoustic-settings profiles, historical chapter-index reconciliation, protected/unidentified WAV counts, an explicit age/scope preview, and an independently revalidated confirmation-only cleanup. New generation and cache hits record a small hashed-text metadata entry (no EPUB prose) into an ignored local SQLite catalog. Unknown files and all WAVs referenced by saved chunk indexes are protected. Engine/headless narration and cache scans/deletions share a nonblocking operation lock. No files are removed automatically. See [Safe cache management](#safe-cache-management-v2140).
 - **V2.13.0 automatic post-queue quality control:** After the last queued part finishes and its M4B/receipt are verified, optionally run the existing read-only CPU WAV scanner on the completed narrator editions. Automatic QC does not compete with TTS or edit audio, and reports critical errors vs review warnings in **Quality Control**. The scanner preserves issue review decisions separately as **Needs review / Reviewed / Dismissed**, resetting them if the underlying chapter/chunk audio changes. From the report, you can open the flagged chapter and focus a specific chunk in the editor. Enable slower deep chunk checks as needed. An optional generic ntfy alert fires once after an automatic QC batch if issues remain to review; previous V2.12.0 notification topics are preserved and the new alert setting is added automatically. See QC setup below.
 - **V2.12.0 optional ntfy.sh Android notifications:** Receive queue-finished, generation-failed, and cache-SSD-unavailable alerts via ntfy's hosted HTTPS service **without leaving Tailscale connected on your phone**. Generic, privacy-minded messages contain no book titles, paths, or diagnostics. Notifications send on background threads and never block Chatterbox or Qt. The 192-bit secret topic and settings are stored in ignored, user-readable-only `output/ntfy.json`. Enable/disable individual alerts, copy the topic and send a test from Settings. The ntfy.sh topic is public to anyone who knows its name; **treat the topic as a secret**. See Android setup below.
@@ -112,6 +113,25 @@ started from a saved Studio queue job does not create a completed-part receipt.
 Back up the SQLite database alongside pronunciation snapshots when archiving
 work. Deleting queue entries does **not** remove M4Bs, WAVs or caches; deleting
 the SQLite database **does** lose the completion history.
+
+## Queue auto-continuation and single-part controls (V2.14.1)
+
+Open **Queue → Start queue** to process all remaining queued parts in
+SQLite execution order, including when you have split a book into
+one-section M4Bs. The new **From selected** button begins with the
+selected queued job and then continues through the remaining queue.
+The **Run ONE part only** button is the explicit manual single-part
+option, and **Pause after part** finishes the current M4B without
+starting the next one. Studio displays a queue-mode indicator during
+the run and logs each automatic transition.
+
+The checkbox **Generate → Start queue immediately** is independent:
+when unchecked, adding parts does not start the queue until you press
+Start queue (or From selected). It does not turn continuous mode off
+once a continuous run starts. As before, reopening Studio does **not**
+automatically begin generation, so you can inspect the queue first.
+A mobile dashboard's **Run selected** action remains intentionally
+single-part; **Start queue** continues automatically on both interfaces.
 
 ## Safe cache management (V2.14.0)
 
