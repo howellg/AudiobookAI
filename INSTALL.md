@@ -245,6 +245,22 @@ keep dozens of **completed queue rows** to preserve part numbering.
 
 **Do not use a 15-chapter overnight queue as your first installation test.** V2.10.1 does not download Chatterbox model weights implicitly. Download the model explicitly while connected, then test CUDA, voice-file parsing, and chapter boundaries with one short section.
 
+### V2.14.1: Continue through all queued parts
+
+On the desktop **Queue** page, choose **Start queue** to run through
+every pending audiobook part automatically. The new **From selected**
+control runs the selected queued part first and then continues through
+the other queued parts. **Run ONE part only** is the explicit single-part
+option. **Pause after part** ends continuous mode after the current M4B
+finishes. The Queue page reports its current operating mode and logs
+each automatic transition.
+
+**Generate → Start queue immediately** only controls whether adding
+parts launches generation immediately; disabling it does not prevent
+continuous processing after you manually start the queue. Existing
+queued parts and settings remain unchanged during the update, and
+restarting Studio intentionally does not auto-resume GPU work.
+
 ### V2.14.0: Intelligent raw cache inventory and verified cleanup
 
 In **Settings → Intelligent raw cache manager**, choose a verification
