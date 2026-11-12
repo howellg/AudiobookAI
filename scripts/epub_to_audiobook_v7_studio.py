@@ -226,11 +226,13 @@ def load_engine():
     return module
 
 
-def book_folder(path: Path, voice_path: Path | None = None, acting_mode: str | None = None):
+def book_folder(path: Path, voice_path: Path | None = None, acting_mode: str | None = None,
+                *, output_root: Path | None = None):
     """Separate chapters by narrator AND opted-in delivery without changing legacy paths."""
     # Include the source location so same-titled books do not share chapter folders.
     fingerprint = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
-    original = OUT_ROOT / f"{safe_name(path.stem, 60)}_{fingerprint}_smooth_v7"
+    root = OUT_ROOT if output_root is None else output_root
+    original = root / f"{safe_name(path.stem, 60)}_{fingerprint}_smooth_v7"
     voice = voice_path if voice_path is not None else ACTIVE_VOICE
     # Legacy British-narrator output must remain discoverable after upgrades.
     if voice is None or Path(voice).resolve() == (ROOT / 'voices' / 'british_narrator.wav').resolve():
