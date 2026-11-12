@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.15.1 — Chapter completion notifications
+
+- Add an opt-in ntfy alert for each newly saved chapter WAV in Studio.
+  A resumed conversion skips alerts for already completed chapters.
+- Show the finished chapter in the private queue activity timeline.
+
+## 2.15.0 — Queue activity and stall alerts
+
+- Show recent converter launches, narration, M4B export, verified completion,
+  and automatic handoffs in the desktop queue and private mobile dashboard.
+- Track FFmpeg encoding progress separately from narration. Report stalled
+  phases and optionally notify through ntfy once per stall until progress
+  resumes. Intentional pauses, safe stops, and SSD waits have their own status.
+- Report setup and process-launch failures with the affected part and reason.
+  Cover the real launch path with offscreen regression tests.
+
 ## 2.14.2 — Independent model-audit bug fixes
 
 - Restore the full **Metadata backups** Settings UI accidentally removed

@@ -29,12 +29,17 @@ function displayStatus(data) {
   current=data;
   $('active-title').textContent = data.active ? data.active.book + ' — ' + data.active.name : 'Nothing running';
   const total = Number(data.active?.total || 0), done=Number(data.active?.done || 0);
-  $('active-detail').textContent = data.active ? 'Section ' + (data.active.section ?? '—') + ' · ' + data.active.status : 'Ready for new work';
-  $('progress-fill').style.width = (total > 0 ? Math.min(100,100*done/total) : 0) + '%';
-  $('progress-text').textContent = data.active ? done + ' / ' + total + ' chunks' : 'Idle';
+  $('active-detail').textContent = data.active?.section == null ? '' : 'Section ' + data.active.section;
+  const exporting = data.export_percent != null;
+  const percent = exporting ? data.export_percent : (total > 0 ? Math.min(100, 100 * done / total) : 0);
+  $('progress-fill').style.width = percent + '%';
+  $('progress-text').textContent = exporting ? percent + '% encoded' :
+    (data.active ? done + ' / ' + total + ' chunks' : 'Idle');
   $('eta').textContent = data.active ? data.eta : '—';
-  $('queue-mode').textContent = data.active ? (data.run_queue ? 'Automatic continuation enabled' : 'Finishing current part, then pausing') :
-    (data.waiting_storage ? 'Paused: cache drive is unavailable' : 'Queue is idle');
+  $('queue-mode').textContent = data.active?.status === 'running' ?
+    (data.run_queue ? 'Automatic continuation enabled' : 'Finishing current part, then pausing') : '';
+  $('queue-status').textContent = data.queue_status || '';
+  $('queue-activity').textContent = (data.queue_activity || []).slice().reverse().join('\n');
   $('queue-count').textContent = data.jobs.filter(j=>j.status==='queued').length + ' waiting';
   $('storage').textContent = data.storage;
   $('logs').textContent = (data.log || []).slice(-15).join('\n');

@@ -586,9 +586,7 @@ def export_m4b(epub_path: Path, title, author, sections, chosen, out: Path, outp
                duration_seconds=round(duration_seconds, 3))
     try:
         if report_progress:
-            # The GUI's full-book export requests real FFmpeg encoding time,
-            # not guessed disk-size or chapter-count progress. Normal part
-            # exports retain their existing subprocess behavior.
+            # Report actual encoding time for Studio part and full-book exports.
             from audiobookai_export_progress import export_progress_metrics
             tracked_cmd = (cmd[:1] + ['-nostats', '-stats_period', '0.5',
                                        '-progress', 'pipe:1'] + cmd[1:])

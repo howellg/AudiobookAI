@@ -35,7 +35,21 @@ class SettingsTests(unittest.TestCase):
         self.assertGreaterEqual(len(first['topic']), 40)
         self.assertEqual(ensure_config(self.path), first)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertTrue(all(first['events'].values()))
+        self.assertEqual(
+            {event for event, enabled in first['events'].items() if not enabled},
+            {'queue_stalled', 'chapter_complete'})
+
+    def test_existing_profile_keeps_stall_alert_opt_in(self):
+        original = ensure_config(self.path, enabled=True)
+        del original['events']['queue_stalled']
+        self.path.write_text(json.dumps(original))
+        loaded = read_config(self.path)
+        self.assertEqual(loaded['topic'], original['topic'])
+        self.assertTrue(loaded['enabled'])
+        self.assertFalse(loaded['events']['queue_stalled'])
+        sender = NtfyPublisher(self.path, sender=lambda *_: None)
+        sender.update(event='queue_stalled', checked=True)
+        self.assertTrue(read_config(self.path)['events']['queue_stalled'])
 
     def test_config_can_be_activated_and_event_flags_changed(self):
         sender = NtfyPublisher(self.path, sender=lambda *_: None)
@@ -133,6 +147,20 @@ class AsyncPublisherTests(unittest.TestCase):
         self.assertTrue(sender.notify('generation_failed'))
         self.assertEqual(self.collect(sender)[0].event, 'generation_failed')
         self.assertEqual(calls, ['generation_failed'])
+
+    def test_chapter_alert_is_opt_in_for_existing_profiles(self):
+        original = ensure_config(self.path, enabled=True)
+        del original['events']['chapter_complete']
+        self.path.write_text(json.dumps(original))
+        sent = []
+        sender = NtfyPublisher(self.path, sender=lambda topic, event: sent.append(event))
+        self.assertEqual(sender.config['topic'], original['topic'])
+        self.assertFalse(sender.notify('chapter_complete'))
+        sender.update(event='chapter_complete', checked=True)
+        self.assertTrue(read_config(self.path)['events']['chapter_complete'])
+        self.assertTrue(sender.notify('chapter_complete'))
+        self.assertTrue(self.collect(sender)[0].sent)
+        self.assertEqual(sent, ['chapter_complete'])
 
     def test_nonblocking_background_delivery_and_result(self):
         go = threading.Event()
