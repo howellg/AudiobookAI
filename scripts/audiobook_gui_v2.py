@@ -101,7 +101,7 @@ class QueueTableWidget(QTableWidget):
     drag_finished = Signal()
 
     def __init__(self, parent=None):
-        super().__init__(0, 7, parent)
+        super().__init__(0, 8, parent)
         self._dragged_job_id = None
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -255,7 +255,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.17.1')
+        self.setWindowTitle('AudiobookAI Studio — V2.17.2')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -367,7 +367,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.17.1 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.17.2 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -503,6 +503,8 @@ class Studio(QMainWindow):
         self.prefs.setValue('last_page', index)
         for i, button in enumerate(self.nav):
             button.setChecked(i == index)
+        if index == 2:
+            self.refresh_jobs()
         if index == 3:
             self.refresh_review()
         if index == 4:
@@ -837,11 +839,13 @@ class Studio(QMainWindow):
         self.job_table.reorder_requested.connect(self.reorder_queue_job)
         self.job_table.drag_finished.connect(self.refresh_jobs)
         self.job_table.setSortingEnabled(False)  # Sorting would hide execution order.
-        self.job_table.setHorizontalHeaderLabels(['Job / part', 'Book', 'Sections', 'Narrator', 'Status', 'Progress', 'Created'])
+        self.job_table.setHorizontalHeaderLabels(
+            ['Job / part', 'Book', 'Sections', 'Narrator', 'Status', 'Progress', 'Word Count', 'Created'])
         self.setup_table(self.job_table)
         self.job_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.job_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.job_table.setColumnWidth(3, 165)
+        self.job_table.resizeColumnToContents(6)
         self.job_table.setMinimumHeight(145)
         self.job_table.setMaximumHeight(255)
         self.job_table.doubleClicked.connect(self.open_selected_output)
@@ -3548,6 +3552,7 @@ class Studio(QMainWindow):
         conversion, and blocking signals prevents partially filled row access.
         """
         jobs = self.store.jobs()
+        word_counts = self.store.queue_section_word_counts()
         table = self.job_table
         selected_job = self.selected_job_id()
         was_sorted = table.isSortingEnabled()
@@ -3560,13 +3565,16 @@ class Studio(QMainWindow):
             active_id = getattr(self, 'active_job_id', None)
             for r, job in enumerate(jobs):
                 nums = json.loads(job['indices'])
+                section_words = {n: word_counts.get((job['book_id'], n)) for n in nums}
+                counts_available = all(count is not None for count in section_words.values())
+                word_total = f'{sum(section_words.values()):,}' if counts_available else '—'
                 done, total = job['completed_chunks'], job['total_chunks']
                 if job['id'] == active_id and self.plan:
                     done, total = sum(self.done_chunks.values()), self.total_chunks
                 values = (job['name'], job['book_title'], str(len(nums)),
                           voice_name(job['voice_path']), job['status'].title(),
                           queue_progress_text(done, total, complete=job['status'] == 'complete'),
-                          job['added'])
+                          word_total, job['added'])
                 for c, value in enumerate(values):
                     cell = table.item(r, c)
                     if cell is None:
@@ -3576,6 +3584,15 @@ class Studio(QMainWindow):
                             cell.setText(str(value))
                         if c == 0 and cell.data(Qt.UserRole) != job['id']:
                             cell.setData(Qt.UserRole, job['id'])
+                lines = [f'Section {n}: {count:,}' if count is not None
+                         else f'Section {n}: word count unavailable'
+                         for n, count in section_words.items()]
+                if not counts_available:
+                    lines.append('Open the EPUB in Generate to refresh its section metadata.')
+                word_cell = table.item(r, 6)
+                tooltip = '\n'.join(lines)
+                if word_cell.toolTip() != tooltip:
+                    word_cell.setToolTip(tooltip)
                 if job['id'] == selected_job:
                     selected_row = r
             if selected_row is not None:
@@ -3899,7 +3916,7 @@ class Studio(QMainWindow):
             'queue_activity': list(activity.events)[-12:],
             'queue_status': activity.status,
             'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
-            'version': '2.17.1', 'run_queue': bool(self.run_queue),
+            'version': '2.17.2', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],

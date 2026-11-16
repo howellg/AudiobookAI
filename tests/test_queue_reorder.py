@@ -116,7 +116,7 @@ class DragWidgetTests(unittest.TestCase):
         self.assertEqual(table.defaultDropAction(), Qt.CopyAction)
         table.setRowCount(3)
         for i, ident in enumerate((11, 22, 33)):
-            for c in range(7):
+            for c in range(table.columnCount()):
                 cell = QTableWidgetItem(f'Job {ident} column {c}')
                 if c == 0:
                     cell.setData(Qt.UserRole, ident)
@@ -147,10 +147,10 @@ class DragWidgetTests(unittest.TestCase):
         # Simulate QAbstractItemView's *post-drop* action: only MoveAction
         # erases the original QTableWidget items. CopyAction must never do so.
         if event.action == Qt.MoveAction:
-            for c in range(7):
+            for c in range(table.columnCount()):
                 table.takeItem(0, c)
         self.assertTrue(all(table.item(row, col) is not None
-                            for row in range(3) for col in range(7)))
+                            for row in range(3) for col in range(table.columnCount())))
         table.close()
 
     def test_drop_reorders_actual_store_and_refreshes_every_cell(self):
@@ -161,14 +161,15 @@ class DragWidgetTests(unittest.TestCase):
             store = Store(Path(tmp) / 'queue.sqlite3')
             try:
                 book_id = store.import_book('/tmp/queue_ui.epub', 'GUI book', 'Author',
-                    [SimpleNamespace(index=1, title='One', text='One', source='a.xhtml')])
-                ids = [store.add_job(book_id, f'Part {n}', [1], f'part_{n}')
-                       for n in range(1, 5)]
+                    [SimpleNamespace(index=1, title='One', text='One', source='a.xhtml'),
+                     SimpleNamespace(index=2, title='Two', text='Two more words', source='b.xhtml')])
+                ids = [store.add_job(book_id, f'Part {n}', sections, f'part_{n}')
+                       for n, sections in enumerate(([1, 2], [2], [9], [1]), 1)]
                 table = QueueTableWidget()
                 table.resize(920, 320)
                 table.setHorizontalHeaderLabels(
                     ['Job / part', 'Book', 'Sections', 'Narrator',
-                     'Status', 'Progress', 'Created'])
+                     'Status', 'Progress', 'Word Count', 'Created'])
                 table.show()
                 self.app.processEvents()
 
@@ -195,6 +196,11 @@ class DragWidgetTests(unittest.TestCase):
                     lambda job_id, dest: Studio.reorder_queue_job(fake, job_id, dest))
                 table.drag_finished.connect(fake.refresh_jobs)
                 fake.refresh_jobs()
+                self.assertEqual([table.item(row, 6).text() for row in range(4)],
+                                 ['4', '3', '—', '1'])
+                self.assertEqual(table.item(0, 6).toolTip(),
+                                 'Section 1: 1\nSection 2: 3')
+                self.assertIn('Section 9: word count unavailable', table.item(2, 6).toolTip())
 
                 # Drag job #1 below all the other jobs.
                 table.selectRow(0)
@@ -220,8 +226,10 @@ class DragWidgetTests(unittest.TestCase):
                     [table.item(row, 0).data(Qt.UserRole) for row in range(4)],
                     expected)
                 self.assertTrue(all(table.item(row, col) is not None
-                    for row in range(4) for col in range(7)))
+                    for row in range(4) for col in range(table.columnCount())))
                 self.assertEqual(fake.selected_job_id(), ids[0])
+                self.assertEqual([table.item(row, 6).text() for row in range(4)],
+                                 ['3', '—', '1', '4'])
 
                 # Verify the Move up button's real callback with selection intact.
                 Studio.move_selected_job(fake, -1)
@@ -232,7 +240,7 @@ class DragWidgetTests(unittest.TestCase):
                     [table.item(i, 0).data(Qt.UserRole) for i in range(4)],
                     [ids[1], ids[2], ids[0], ids[3]])
                 self.assertTrue(all(table.item(row, col) is not None
-                    for row in range(4) for col in range(7)))
+                    for row in range(4) for col in range(table.columnCount())))
                 table.close()
             finally:
                 store.close()

@@ -353,6 +353,12 @@ class Store:
         return self.db.execute('''SELECT jobs.*, books.title AS book_title, books.path AS book_path
                                   FROM jobs JOIN books ON jobs.book_id=books.id WHERE jobs.id=?''', (job_id,)).fetchone()
 
+    def queue_section_word_counts(self):
+        """Return stored word counts for EPUBs represented in the queue."""
+        rows = self.db.execute('''SELECT book_id, section_index, words FROM book_sections
+                                  WHERE book_id IN (SELECT book_id FROM jobs)''')
+        return {(row['book_id'], row['section_index']): row['words'] for row in rows}
+
     def next_job(self):
         """Return the next pending job in user-defined queue order."""
         return self.db.execute(

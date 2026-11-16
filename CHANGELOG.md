@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.17.2 — Queue word counts
+
+- Show the word count of each queued part, with a per-section breakdown on hover.
+
 ## 2.17.1 — Live queue progress and Move to top
 
 - Update the active queue row when its whole narration percentage changes.
