@@ -176,6 +176,37 @@ class StudioHandoffTests(unittest.TestCase):
         self.assertFalse(studio.exporting)
         studio.proc = None
 
+    def test_queue_shows_live_percent_and_move_to_top_keeps_active_job_running(self):
+        studio = self.studio
+        studio.maybe_auto_metadata_backup = Mock()
+        studio.start_queue()
+        studio.progress_event({'event': 'plan', 'sections': [
+            {'index': 1, 'title': 'Chapter 1', 'chunks': 1000, 'completed': False},
+        ]})
+        table = studio.job_table
+        self.assertEqual(table.item(0, 5).text(), '0%')
+        changes = []
+        table.itemChanged.connect(lambda cell: changes.append((cell.column(), cell.text())))
+        with patch.object(gui.time, 'monotonic', return_value=studio.last_progress_save + 1):
+            for chunk in (9, 10, 11):
+                studio.progress_event({'event': 'chunk_done', 'index': 1,
+                                       'chunk': chunk, 'total': 1000})
+        self.assertEqual(changes, [(5, '1%')])
+        self.assertEqual(studio.store.job(self.first)['completed_chunks'], 0)
+
+        table.selectRow(1)
+        studio.queue_search.setText('Part 2')
+        self.assertFalse(studio.queue_top.isEnabled())
+        studio.queue_search.clear()
+        table.selectRow(1)
+        studio.queue_top.click()
+        self.assertEqual(studio.store.next_job()['id'], self.second)
+        self.assertEqual(studio.selected_job_id(), self.second)
+        self.assertEqual(studio.active_job_id, self.first)
+        self.assertEqual(studio.store.job(self.first)['status'], 'running')
+        self.assertEqual(table.item(1, 5).text(), '1%')
+        studio.proc = None
+
     def test_qprocess_failure_is_reported_without_phantom_running_job(self):
         studio = self.studio
         studio.maybe_auto_metadata_backup = Mock()

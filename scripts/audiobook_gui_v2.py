@@ -174,6 +174,13 @@ def post_optional_alert(controller, event):
         notify(event)
 
 
+def queue_progress_text(done, total, *, complete=False):
+    """Format the whole percentage of narration chunks completed."""
+    if complete:
+        return '100%'
+    return f'{min(100, 100 * done // total)}%' if total else '—'
+
+
 def fmt_seconds(seconds):
     """Format a number of elapsed or estimated seconds for progress labels."""
     if seconds is None:
@@ -248,7 +255,7 @@ class Studio(QMainWindow):
     def __init__(self):
         """Create the window, restore saved preferences, open SQLite, and wire the pages and timers."""
         super().__init__()
-        self.setWindowTitle('AudiobookAI Studio — V2.17.0')
+        self.setWindowTitle('AudiobookAI Studio — V2.17.1')
         self.resize(1330, 900)
         self.prefs = QSettings('AudiobookAI', 'Studio')
         # Notification configuration is an ignored, mode-0600 local file.
@@ -275,6 +282,7 @@ class Studio(QMainWindow):
         self.mysql_retry_after = 0.0
         self.mysql_sync_pending = False
         self.last_progress_save = 0.0
+        self._queue_progress_text = None
         self.last_progress_chunks = 0
         self.converter = None
         self.current_book_id = None
@@ -359,7 +367,7 @@ class Studio(QMainWindow):
         nav.setContentsMargins(16, 23, 16, 18)
         nav.setSpacing(7)
         nav.addWidget(title_label('AudiobookAI', 16))
-        version = QLabel('STUDIO  /  V2.17.0 · V7 SMOOTH')
+        version = QLabel('STUDIO  /  V2.17.1 · V7 SMOOTH')
         version.setObjectName('muted')
         nav.addWidget(version)
         nav.addSpacing(20)
@@ -745,16 +753,21 @@ class Studio(QMainWindow):
         bar.addWidget(mk_button('Recover interrupted', self.recover_interrupted,
             'Requeue interrupted parts only when their source files and snapshots still exist'))
         bar.addWidget(mk_button('Remove selected', self.remove_selected_job))
+        bar.addStretch()
+        l.addLayout(bar)
+        moves = QHBoxLayout()
         self.queue_up = mk_button('↑ Move up', lambda: self.move_selected_job(-1),
             'Move a pending part one row earlier in the execution order')
         self.queue_down = mk_button('↓ Move down', lambda: self.move_selected_job(1),
             'Move a pending part one row later in the execution order')
+        self.queue_top = mk_button('Move to top', self.move_selected_to_top,
+            'Make the selected pending part the next part to run')
         self.queue_end = mk_button('Move to end', self.move_selected_to_end,
             'Place a pending part after the rest of the queue')
-        for control in (self.queue_up, self.queue_down, self.queue_end):
-            bar.addWidget(control)
-        bar.addStretch()
-        l.addLayout(bar)
+        for control in (self.queue_up, self.queue_down, self.queue_top, self.queue_end):
+            moves.addWidget(control)
+        moves.addStretch()
+        l.addLayout(moves)
         self.queue_mode_status = QLabel(
             'Queue idle — Start queue runs all pending parts continuously. '
             'From selected also continues automatically.')
@@ -833,7 +846,7 @@ class Studio(QMainWindow):
         self.job_table.setMaximumHeight(255)
         self.job_table.doubleClicked.connect(self.open_selected_output)
         l.addWidget(self.job_table)
-        queue_hint = QLabel('Execution order: top → bottom. Drag pending rows to reorder, or use Move up/down/end. Active parts cannot be moved.')
+        queue_hint = QLabel('Execution order: top → bottom. Drag pending rows or use the Move buttons. Active parts cannot be moved.')
         queue_hint.setObjectName('muted')
         queue_hint.setWordWrap(True)
         l.addWidget(queue_hint)
@@ -3226,7 +3239,7 @@ class Studio(QMainWindow):
         # the complete execution order to be visible for drag and buttons.
         unfiltered = wanted == 'All jobs' and not term
         self.job_table.setDragEnabled(unfiltered)
-        for control in (self.queue_up, self.queue_down, self.queue_end):
+        for control in (self.queue_up, self.queue_down, self.queue_top, self.queue_end):
             control.setEnabled(unfiltered)
 
     def copy_log(self):
@@ -3544,12 +3557,16 @@ class Studio(QMainWindow):
             table.setSortingEnabled(False)
             table.setRowCount(len(jobs))
             selected_row = None
+            active_id = getattr(self, 'active_job_id', None)
             for r, job in enumerate(jobs):
                 nums = json.loads(job['indices'])
+                done, total = job['completed_chunks'], job['total_chunks']
+                if job['id'] == active_id and self.plan:
+                    done, total = sum(self.done_chunks.values()), self.total_chunks
                 values = (job['name'], job['book_title'], str(len(nums)),
                           voice_name(job['voice_path']), job['status'].title(),
-                          f"{round(100 * job['completed_chunks']/job['total_chunks'])}%"
-                          if job['total_chunks'] else '—', job['added'])
+                          queue_progress_text(done, total, complete=job['status'] == 'complete'),
+                          job['added'])
                 for c, value in enumerate(values):
                     cell = table.item(r, c)
                     if cell is None:
@@ -3596,6 +3613,14 @@ class Studio(QMainWindow):
         ordered = [row['id'] for row in self.store.jobs()]
         if job_id in ordered:
             self.reorder_queue_job(job_id, ordered.index(job_id) + direction)
+
+    def move_selected_to_top(self):
+        """Put the selected queued part first in the saved execution order."""
+        job_id = self.selected_job_id()
+        if job_id is None:
+            self.statusBar().showMessage('Select a queued part to move.')
+            return
+        self.reorder_queue_job(job_id, 0)
 
     def move_selected_to_end(self):
         """Send a pending chapter behind a currently queued full book."""
@@ -3874,7 +3899,7 @@ class Studio(QMainWindow):
             'queue_activity': list(activity.events)[-12:],
             'queue_status': activity.status,
             'export_percent': activity.export_percent if activity.phase == 'exporting' else None,
-            'version': '2.17.0', 'run_queue': bool(self.run_queue),
+            'version': '2.17.1', 'run_queue': bool(self.run_queue),
             'waiting_storage': bool(self.storage_waiting),
             'active': ({
                 'id': active['id'], 'name': active['name'],
@@ -4515,6 +4540,7 @@ class Studio(QMainWindow):
         self.chunk_durations.clear()
         self.recent_chunk_durations.clear()
         self.plan.clear()
+        self._queue_progress_text = None
         self.done_chunks.clear()
         self.saved_chapters.clear()
         self.total_chunks = 0
@@ -4660,10 +4686,21 @@ class Studio(QMainWindow):
             self.persist_progress()
 
     def persist_progress(self, force=False):
-        """Rate-limit durable chunk-count writes to avoid excessive SQLite traffic."""
+        """Update the live queue row independently of the durable checkpoint."""
         if self.active_job_id is None or not self.plan:
             return
         done = sum(self.done_chunks.values())
+        text = queue_progress_text(done, self.total_chunks)
+        if text != self._queue_progress_text:
+            self._queue_progress_text = text
+            table = self.job_table
+            for row in range(table.rowCount()):
+                first = table.item(row, 0)
+                if first is not None and first.data(Qt.UserRole) == self.active_job_id:
+                    progress = table.item(row, 5)
+                    if progress is not None and progress.text() != text:
+                        progress.setText(text)
+                    break
         current_time = time.monotonic()
         # SQLite writes and downstream MySQL updates are intentionally throttled.
         if not force and done-self.last_progress_chunks < 20 and current_time-self.last_progress_save < 15:

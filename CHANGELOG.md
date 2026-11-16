@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.17.1 — Live queue progress and Move to top
+
+- Update the active queue row when its whole narration percentage changes.
+- Move a queued part to the top of the saved execution order.
+
 ## 2.17.0 — Finish Book
 
 - Use Finish Book to review gaps and quality findings, run a chapter scan,
